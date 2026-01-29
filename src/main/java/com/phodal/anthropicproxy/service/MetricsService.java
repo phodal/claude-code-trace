@@ -5,7 +5,6 @@ import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
-import com.phodal.anthropicproxy.model.anthropic.AnthropicContent;
 import com.phodal.anthropicproxy.model.anthropic.AnthropicMessage;
 import com.phodal.anthropicproxy.model.anthropic.AnthropicRequest;
 import com.phodal.anthropicproxy.model.metrics.LinesModifiedInfo;
