@@ -1,7 +1,6 @@
 package com.phodal.anthropicproxy.controller;
 
-import com.phodal.anthropicproxy.model.metrics.SessionInfo;
-import com.phodal.anthropicproxy.model.metrics.ToolCallLog;
+import com.phodal.anthropicproxy.converter.MetricsConverter;
 import com.phodal.anthropicproxy.model.metrics.TurnLog;
 import com.phodal.anthropicproxy.service.MetricsService;
 import com.phodal.anthropicproxy.service.SessionManager;
@@ -10,10 +9,8 @@ import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Controller for metrics dashboard
@@ -24,6 +21,7 @@ import java.util.stream.Collectors;
 public class MetricsDashboardController {
 
     private final MetricsService metricsService;
+    private final MetricsConverter metricsConverter;
 
     /**
      * Main dashboard page
@@ -42,21 +40,9 @@ public class MetricsDashboardController {
         model.addAttribute("toolCallsByName", metrics.getToolCallsByName());
         
         // Get user metrics
-        List<Map<String, Object>> userMetricsList = metricsService.getUserMetricsMap().values().stream()
-                .map(um -> {
-                    Map<String, Object> map = new HashMap<>();
-                    map.put("userId", um.getUserId());
-                    map.put("totalRequests", um.getTotalRequests().get());
-                    map.put("totalToolCalls", um.getTotalToolCalls().get());
-                    map.put("editToolCalls", um.getEditToolCalls().get());
-                    map.put("linesModified", um.getLinesModified().get());
-                    map.put("inputTokens", um.getInputTokens().get());
-                    map.put("outputTokens", um.getOutputTokens().get());
-                    map.put("firstSeen", um.getFirstSeen());
-                    map.put("lastSeen", um.getLastSeen());
-                    return map;
-                })
-                .collect(Collectors.toList());
+        List<Map<String, Object>> userMetricsList = metricsConverter.userMetricsListToMap(
+                metricsService.getUserMetricsMap().values().stream().toList()
+        );
         model.addAttribute("userMetrics", userMetricsList);
         
         // Get recent requests
@@ -81,22 +67,8 @@ public class MetricsDashboardController {
     @ResponseBody
     public List<Map<String, Object>> getUserMetrics() {
         return metricsService.getUserMetricsMap().values().stream()
-                .map(um -> {
-                    Map<String, Object> map = new HashMap<>();
-                    map.put("userId", um.getUserId());
-                    map.put("totalRequests", um.getTotalRequests().get());
-                    map.put("totalToolCalls", um.getTotalToolCalls().get());
-                    map.put("editToolCalls", um.getEditToolCalls().get());
-                    map.put("linesModified", um.getLinesModified().get());
-                    map.put("inputTokens", um.getInputTokens().get());
-                    map.put("outputTokens", um.getOutputTokens().get());
-                    map.put("firstSeen", um.getFirstSeen());
-                    map.put("lastSeen", um.getLastSeen());
-                    map.put("toolCallsByName", um.getToolCallsByName().entrySet().stream()
-                            .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().get())));
-                    return map;
-                })
-                .collect(Collectors.toList());
+                .map(metricsConverter::userMetricsToDetailedMap)
+                .toList();
     }
 
     /**
@@ -114,9 +86,7 @@ public class MetricsDashboardController {
     @GetMapping("/api/turns")
     @ResponseBody
     public List<Map<String, Object>> getRecentTurns() {
-        return metricsService.getRecentTurns().stream()
-                .map(this::turnLogToMap)
-                .collect(Collectors.toList());
+        return metricsConverter.turnLogListToMap(metricsService.getRecentTurns());
     }
     
     /**
@@ -125,9 +95,7 @@ public class MetricsDashboardController {
     @GetMapping("/api/users/{userId}/turns")
     @ResponseBody
     public List<Map<String, Object>> getTurnsByUser(@PathVariable String userId) {
-        return metricsService.getTurnsForUser(userId).stream()
-                .map(this::turnLogToMap)
-                .collect(Collectors.toList());
+        return metricsConverter.turnLogListToMap(metricsService.getTurnsForUser(userId));
     }
     
     /**
@@ -136,9 +104,7 @@ public class MetricsDashboardController {
     @GetMapping("/api/sessions/{sessionId}/turns")
     @ResponseBody
     public List<Map<String, Object>> getTurnsBySession(@PathVariable String sessionId) {
-        return metricsService.getTurnsForSession(sessionId).stream()
-                .map(this::turnLogToMap)
-                .collect(Collectors.toList());
+        return metricsConverter.turnLogListToMap(metricsService.getTurnsForSession(sessionId));
     }
     
     /**
@@ -151,7 +117,7 @@ public class MetricsDashboardController {
         if (turn == null) {
             return Map.of("error", "Turn not found");
         }
-        return turnLogToDetailMap(turn);
+        return metricsConverter.turnLogToDetailMap(turn);
     }
     
     /**
@@ -161,9 +127,7 @@ public class MetricsDashboardController {
     @ResponseBody
     public List<Map<String, Object>> getRecentSessions() {
         SessionManager sessionManager = metricsService.getSessionManager();
-        return sessionManager.getRecentSessions(50).stream()
-                .map(this::sessionInfoToMap)
-                .collect(Collectors.toList());
+        return metricsConverter.sessionInfoListToMap(sessionManager.getRecentSessions(50));
     }
     
     /**
@@ -173,81 +137,6 @@ public class MetricsDashboardController {
     @ResponseBody
     public List<Map<String, Object>> getSessionsByUser(@PathVariable String userId) {
         SessionManager sessionManager = metricsService.getSessionManager();
-        return sessionManager.getUserSessions(userId).stream()
-                .map(this::sessionInfoToMap)
-                .collect(Collectors.toList());
-    }
-    
-    private Map<String, Object> turnLogToMap(TurnLog turn) {
-        Map<String, Object> map = new HashMap<>();
-        map.put("turnId", turn.getTurnId());
-        map.put("userId", turn.getUserId());
-        map.put("sessionId", turn.getSessionId());
-        map.put("timestamp", turn.getTimestamp());
-        map.put("model", turn.getModel());
-        map.put("stream", turn.isStream());
-        map.put("toolsOfferedCount", turn.getToolsOfferedCount());
-        map.put("lastUserMessagePreview", turn.getLastUserMessagePreview());
-        map.put("promptTokens", turn.getPromptTokens());
-        map.put("completionTokens", turn.getCompletionTokens());
-        map.put("latencyMs", turn.getLatencyMs());
-        map.put("toolCallCount", turn.getToolCallCount());
-        map.put("editToolCallCount", turn.getEditToolCallCount());
-        map.put("linesModified", turn.getLinesModified());
-        map.put("linesAdded", turn.getLinesAdded());
-        map.put("linesRemoved", turn.getLinesRemoved());
-        map.put("hasError", turn.isHasError());
-        map.put("errorMessage", turn.getErrorMessage());
-        
-        // Include tool calls
-        if (turn.getToolCalls() != null) {
-            map.put("toolCalls", turn.getToolCalls().stream()
-                    .map(this::toolCallLogToMap)
-                    .collect(Collectors.toList()));
-        }
-        
-        return map;
-    }
-
-    private Map<String, Object> turnLogToDetailMap(TurnLog turn) {
-        Map<String, Object> map = turnLogToMap(turn);
-        map.put("lastUserMessage", turn.getLastUserMessage());
-        return map;
-    }
-    
-    private Map<String, Object> toolCallLogToMap(ToolCallLog toolCall) {
-        Map<String, Object> map = new HashMap<>();
-        map.put("toolCallId", toolCall.getToolCallId());
-        map.put("turnId", toolCall.getTurnId());
-        map.put("name", toolCall.getName());
-        map.put("argsPreview", toolCall.getArgsPreview());
-        map.put("timestamp", toolCall.getTimestamp());
-        map.put("durationMs", toolCall.getDurationMs());
-        map.put("status", toolCall.getStatus());
-        map.put("linesModified", toolCall.getLinesModified());
-        map.put("linesAdded", toolCall.getLinesAdded());
-        map.put("linesRemoved", toolCall.getLinesRemoved());
-        map.put("filePath", toolCall.getFilePath());
-        map.put("errorMessage", toolCall.getErrorMessage());
-        return map;
-    }
-    
-    private Map<String, Object> sessionInfoToMap(SessionInfo session) {
-        Map<String, Object> map = new HashMap<>();
-        map.put("sessionId", session.getSessionId());
-        map.put("userId", session.getUserId());
-        map.put("startTime", session.getStartTime());
-        map.put("lastActivityTime", session.getLastActivityTime());
-        map.put("turnCount", session.getTurnCount().get());
-        map.put("totalToolCalls", session.getTotalToolCalls().get());
-        map.put("editToolCalls", session.getEditToolCalls().get());
-        map.put("totalLinesModified", session.getTotalLinesModified().get());
-        map.put("totalPromptTokens", session.getTotalPromptTokens().get());
-        map.put("totalCompletionTokens", session.getTotalCompletionTokens().get());
-        map.put("avgToolCallsPerTurn", session.getAvgToolCallsPerTurn());
-        map.put("avgLatencyMs", session.getAvgLatencyMs());
-        map.put("errorCount", session.getErrorCount().get());
-        map.put("toolUsage", session.getToolUsageSnapshot());
-        return map;
+        return metricsConverter.sessionInfoListToMap(sessionManager.getUserSessions(userId));
     }
 }
