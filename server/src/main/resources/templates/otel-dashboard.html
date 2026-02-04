@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTEL Trace Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Keep CSS vanilla (no Tailwind build step). */
+        .card { background:#fff; border:1px solid #e5e7eb; border-radius:0.5rem; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+        .pill { display:inline-flex; align-items:center; border-radius:9999px; padding:0.125rem 0.5rem; font-size:0.75rem; font-weight:600; border:1px solid; }
+        .pill-ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
+        .pill-err { background:#fef2f2; color:#b91c1c; border-color:#fecaca; }
+        .pill-unset { background:#f9fafb; color:#374151; border-color:#e5e7eb; }
+        .row-hover:hover { background:#f9fafb; cursor:pointer; }
+        .codebox { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:0.75rem; background:#f9fafb; border:1px solid #e5e7eb; border-radius:0.5rem; padding:0.75rem; overflow:auto; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div class="max-w-7xl mx-auto px-4 py-8">
+    <header class="mb-6">
+        <div class="flex items-start justify-between gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-900">OTEL Trace Dashboard</h1>
+                <p class="text-gray-600 mt-1">Browse completed traces and inspect spans/attributes.</p>
+            </div>
+            <div class="flex gap-2">
+                <a href="/metrics" class="text-sm px-3 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50">Agent Trace Dashboard</a>
+                <button id="btn-refresh" class="text-sm px-3 py-2 rounded bg-gray-900 text-white hover:bg-gray-800">Refresh</button>
+            </div>
+        </div>
+    </header>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Left: list -->
+        <div class="lg:col-span-1 space-y-4">
+            <div class="card p-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="font-semibold text-gray-900">Traces</h2>
+                    <div class="flex items-center gap-2">
+                        <label class="text-xs text-gray-500">Limit</label>
+                        <select id="limit" class="text-sm border border-gray-300 rounded px-2 py-1 bg-white">
+                            <option value="20">20</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="mt-3 flex gap-2">
+                    <input id="search" class="w-full text-sm border border-gray-300 rounded px-3 py-2" placeholder="Search traceId / route / model / user…">
+                    <button id="btn-clear" class="text-sm px-3 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50">Clear</button>
+                </div>
+
+                <div id="metrics" class="mt-3 text-xs text-gray-600">
+                    Loading…
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="p-3 border-b border-gray-200 flex items-center justify-between">
+                    <div class="text-sm font-medium text-gray-900">Recent completed traces</div>
+                    <div id="list-status" class="text-xs text-gray-500"></div>
+                </div>
+                <div class="max-h-[68vh] overflow-auto">
+                    <table class="min-w-full divide-y divide-gray-200 text-sm">
+                        <thead class="bg-gray-50 sticky top-0 z-10">
+                        <tr>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-600">Time</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-600">Route</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-600">Dur</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-600">Spans</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-600">Status</th>
+                        </tr>
+                        </thead>
+                        <tbody id="traces-tbody" class="divide-y divide-gray-200 bg-white">
+                        <tr><td class="px-3 py-3 text-gray-500" colspan="5">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: detail -->
+        <div class="lg:col-span-2 space-y-4">
+            <div class="card p-4">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <div class="text-sm text-gray-500">Selected trace</div>
+                        <div id="selected-trace-id" class="mono text-sm font-semibold text-gray-900">None</div>
+                        <div id="selected-trace-sub" class="mt-1 text-xs text-gray-600"></div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="btn-export" disabled class="text-sm px-3 py-2 rounded bg-blue-600 text-white disabled:bg-gray-300 hover:bg-blue-700">Export</button>
+                        <button id="btn-copy" disabled class="text-sm px-3 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50">Copy traceId</button>
+                        <button id="btn-raw" disabled class="text-sm px-3 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50">Raw JSON</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="p-3 border-b border-gray-200 flex items-center justify-between">
+                    <div class="text-sm font-medium text-gray-900">Spans</div>
+                    <div class="text-xs text-gray-500">Click to expand attributes</div>
+                </div>
+                <div id="spans" class="p-3">
+                    <div class="text-sm text-gray-500">Select a trace from the left.</div>
+                </div>
+            </div>
+
+            <div id="raw-panel" class="card hidden">
+                <div class="p-3 border-b border-gray-200 flex items-center justify-between">
+                    <div class="text-sm font-medium text-gray-900">Raw OTEL JSON</div>
+                    <button id="btn-raw-close" class="text-sm px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Close</button>
+                </div>
+                <pre id="raw-json" class="codebox m-3"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script th:inline="javascript">
+    const DEFAULT_LIMIT = /*[[${defaultLimit}]]*/ 50;
+    const API = {
+        traces: (limit) => `/otel/traces?limit=${encodeURIComponent(limit)}`,
+        trace: (id) => `/otel/traces/${encodeURIComponent(id)}`,
+        export: (id) => `/otel/traces/${encodeURIComponent(id)}/export`,
+        exporters: () => `/otel/exporters`,
+        metrics: () => `/otel/metrics`,
+    };
+
+    const state = {
+        traces: [],
+        filtered: [],
+        selectedTraceId: null,
+        selectedTraceJson: null,
+        exporters: null,
+        metrics: null,
+    };
+
+    function $(id) { return document.getElementById(id); }
+
+    function formatTime(isoOrDate) {
+        if (!isoOrDate) return '-';
+        const d = new Date(isoOrDate);
+        if (Number.isNaN(d.getTime())) return String(isoOrDate);
+        return d.toLocaleString(undefined, { hour12: false });
+    }
+
+    function truncate(s, n) {
+        if (!s) return '';
+        s = String(s);
+        return s.length > n ? s.slice(0, n) + '…' : s;
+    }
+
+    function statusPill(code) {
+        const c = (code || 'UNSET').toUpperCase();
+        const cls = c === 'OK' ? 'pill pill-ok' : (c === 'ERROR' ? 'pill pill-err' : 'pill pill-unset');
+        return `<span class="${cls}">${c}</span>`;
+    }
+
+    function escapeHtml(s) {
+        return String(s ?? '')
+            .replaceAll('&','&amp;')
+            .replaceAll('<','&lt;')
+            .replaceAll('>','&gt;')
+            .replaceAll('"','&quot;')
+            .replaceAll("'",'&#039;');
+    }
+
+    async function fetchJson(url, opts) {
+        const r = await fetch(url, opts);
+        if (!r.ok) {
+            const text = await r.text().catch(() => '');
+            throw new Error(`HTTP ${r.status} ${r.statusText}: ${text}`.trim());
+        }
+        return await r.json();
+    }
+
+    function deriveStatusFromTraceJson(traceJson) {
+        // traceJson: {traceId, spans:[{status:{code,message}, ...}, ...]}
+        const spans = traceJson?.spans || [];
+        for (const sp of spans) {
+            const code = sp?.status?.code;
+            if (String(code).toUpperCase() === 'ERROR') return 'ERROR';
+        }
+        // If any span has endTime=0 maybe still active, but this UI focuses completed traces.
+        return 'OK';
+    }
+
+    function applyFilter() {
+        const q = $('search').value.trim().toLowerCase();
+        if (!q) {
+            state.filtered = state.traces.slice();
+            return;
+        }
+        state.filtered = state.traces.filter(t => {
+            const hay = [
+                t.traceId,
+                t.rootSpanName,
+                t.route,
+                t.model,
+                t.userId,
+                t.status,
+            ].filter(Boolean).join(' ').toLowerCase();
+            return hay.includes(q);
+        });
+    }
+
+    function renderMetrics() {
+        const m = state.metrics;
+        if (!m) { $('metrics').textContent = '—'; return; }
+        $('metrics').innerHTML = `
+            <div class="flex flex-wrap gap-2">
+                <span class="pill pill-unset">active: ${escapeHtml(m.activeTraces)}</span>
+                <span class="pill pill-unset">completed: ${escapeHtml(m.completedTraces)}</span>
+                <span class="pill pill-unset">spans: ${escapeHtml(m.totalSpans)}</span>
+            </div>
+        `;
+    }
+
+    function renderTraceList() {
+        applyFilter();
+        const rows = state.filtered;
+        $('list-status').textContent = `${rows.length} shown`;
+        const tbody = $('traces-tbody');
+        if (!rows.length) {
+            tbody.innerHTML = `<tr><td class="px-3 py-3 text-gray-500" colspan="5">No traces.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = rows.map(t => {
+            const selected = state.selectedTraceId === t.traceId;
+            const trCls = selected ? 'bg-blue-50' : '';
+            return `
+              <tr class="${trCls} row-hover" data-trace-id="${escapeHtml(t.traceId)}">
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600">${escapeHtml(formatTime(t.startTime))}</td>
+                <td class="px-3 py-2 text-xs text-gray-800">
+                    <div class="font-medium">${escapeHtml(truncate(t.route || t.rootSpanName || '-', 32))}</div>
+                    <div class="text-gray-500">${escapeHtml(truncate([t.model, t.userId].filter(Boolean).join(' · '), 36))}</div>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-700">${escapeHtml(t.durationMs)}ms</td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-700">${escapeHtml(t.spanCount)}</td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs">${statusPill(t.status || 'UNSET')}</td>
+              </tr>
+            `;
+        }).join('');
+    }
+
+    function buildSpanTree(spans) {
+        const nodes = new Map();
+        const children = new Map(); // parentId -> [childIds]
+        for (const sp of spans) {
+            const id = sp.spanId;
+            nodes.set(id, sp);
+            const p = sp.parentSpanId || null;
+            const pid = (p === '' ? null : p);
+            const key = pid || '__root__';
+            if (!children.has(key)) children.set(key, []);
+            children.get(key).push(id);
+        }
+        // sort by start time
+        for (const [k, ids] of children.entries()) {
+            ids.sort((a, b) => (nodes.get(a).startTimeUnixNano || 0) - (nodes.get(b).startTimeUnixNano || 0));
+        }
+        return { nodes, children };
+    }
+
+    function renderSpanRow(sp, depth) {
+        const code = (sp?.status?.code || 'UNSET').toUpperCase();
+        const cls = code === 'OK' ? 'pill pill-ok' : (code === 'ERROR' ? 'pill pill-err' : 'pill pill-unset');
+        const indent = depth * 14;
+        const durMs = Math.max(0, Math.round(((sp.endTimeUnixNano || 0) - (sp.startTimeUnixNano || 0)) / 1_000_000));
+        const attrs = sp.attributes || {};
+        const keyAttrs = [
+            attrs['http.method'] ? `http.method=${attrs['http.method']}` : null,
+            attrs['http.route'] ? `http.route=${attrs['http.route']}` : null,
+            attrs['model'] ? `model=${attrs['model']}` : null,
+            attrs['api.model'] ? `api.model=${attrs['api.model']}` : null,
+            attrs['user.id'] ? `user.id=${attrs['user.id']}` : null,
+            attrs['conversation.id'] ? `conversation.id=${attrs['conversation.id']}` : null,
+            attrs['stream'] !== undefined ? `stream=${attrs['stream']}` : null,
+        ].filter(Boolean);
+
+        return `
+          <div class="border border-gray-200 rounded mb-2 bg-white" style="margin-left:${indent}px">
+            <button class="w-full text-left px-3 py-2 flex items-start justify-between gap-3 span-toggle" data-span-id="${escapeHtml(sp.spanId)}">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="mono text-xs text-gray-500">${escapeHtml(sp.spanId)}</span>
+                  <span class="text-sm font-medium text-gray-900">${escapeHtml(sp.name || '-')}</span>
+                  <span class="text-xs text-gray-500">${escapeHtml(sp.kind || '')}</span>
+                </div>
+                <div class="mt-0.5 text-xs text-gray-600">
+                  ${escapeHtml(keyAttrs.join(' · '))}
+                </div>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <span class="text-xs text-gray-600">${durMs}ms</span>
+                <span class="${cls}">${code}</span>
+              </div>
+            </button>
+            <div class="hidden px-3 pb-3 span-detail" id="span-detail-${escapeHtml(sp.spanId)}">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <div class="text-xs font-semibold text-gray-700 mb-1">Attributes</div>
+                  <pre class="codebox">${escapeHtml(JSON.stringify(sp.attributes || {}, null, 2))}</pre>
+                </div>
+                <div>
+                  <div class="text-xs font-semibold text-gray-700 mb-1">Status</div>
+                  <pre class="codebox">${escapeHtml(JSON.stringify(sp.status || {}, null, 2))}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+    }
+
+    function renderSpans(traceJson) {
+        const spans = traceJson?.spans || [];
+        if (!spans.length) {
+            $('spans').innerHTML = `<div class="text-sm text-gray-500">No spans.</div>`;
+            return;
+        }
+        const { nodes, children } = buildSpanTree(spans);
+        const rootIds = children.get('__root__') || [];
+        const out = [];
+        function walk(id, depth) {
+            const sp = nodes.get(id);
+            out.push(renderSpanRow(sp, depth));
+            const kids = children.get(id) || [];
+            for (const k of kids) walk(k, depth + 1);
+        }
+        for (const rid of rootIds) walk(rid, 0);
+        $('spans').innerHTML = out.join('');
+    }
+
+    function setSelected(traceId, summary) {
+        state.selectedTraceId = traceId;
+        $('selected-trace-id').textContent = traceId || 'None';
+        $('selected-trace-sub').textContent = summary ? `${summary.route || summary.rootSpanName || ''}` : '';
+        $('btn-export').disabled = !traceId;
+        $('btn-copy').disabled = !traceId;
+        $('btn-raw').disabled = !traceId;
+        $('raw-panel').classList.add('hidden');
+        state.selectedTraceJson = null;
+    }
+
+    async function loadTraceDetail(traceId) {
+        const traceJson = await fetchJson(API.trace(traceId));
+        state.selectedTraceJson = traceJson;
+        renderSpans(traceJson);
+        $('raw-json').textContent = JSON.stringify(traceJson, null, 2);
+    }
+
+    async function refreshAll() {
+        const limit = Number($('limit').value || DEFAULT_LIMIT);
+        $('list-status').textContent = 'Loading…';
+        try {
+            const [metrics, exporters, traces] = await Promise.all([
+                fetchJson(API.metrics()).catch(() => null),
+                fetchJson(API.exporters()).catch(() => null),
+                fetchJson(API.traces(limit)),
+            ]);
+            state.metrics = metrics;
+            state.exporters = exporters;
+            // OtelController returns {traces: [...], total: n}
+            const traceList = (traces && Array.isArray(traces.traces)) ? traces.traces : (Array.isArray(traces) ? traces : []);
+            state.traces = traceList.map(t => ({ ...t }));
+            renderMetrics();
+            renderTraceList();
+
+            // If selected is still visible, keep it highlighted; otherwise clear.
+            if (state.selectedTraceId && !state.traces.some(t => t.traceId === state.selectedTraceId)) {
+                setSelected(null, null);
+                $('spans').innerHTML = `<div class="text-sm text-gray-500">Select a trace from the left.</div>`;
+            }
+        } catch (e) {
+            console.error(e);
+            $('list-status').textContent = 'Failed';
+            $('traces-tbody').innerHTML = `<tr><td class="px-3 py-3 text-red-700" colspan="5">${escapeHtml(e.message)}</td></tr>`;
+        }
+    }
+
+    // Event wiring
+    $('btn-refresh').addEventListener('click', refreshAll);
+    $('limit').addEventListener('change', refreshAll);
+    $('btn-clear').addEventListener('click', () => { $('search').value=''; renderTraceList(); });
+    $('search').addEventListener('input', () => renderTraceList());
+
+    $('traces-tbody').addEventListener('click', async (e) => {
+        const tr = e.target.closest('tr[data-trace-id]');
+        if (!tr) return;
+        const traceId = tr.getAttribute('data-trace-id');
+        const summary = state.traces.find(t => t.traceId === traceId) || null;
+        setSelected(traceId, summary);
+        renderTraceList();
+        $('spans').innerHTML = `<div class="text-sm text-gray-500">Loading trace…</div>`;
+        try {
+            await loadTraceDetail(traceId);
+        } catch (err) {
+            $('spans').innerHTML = `<div class="text-sm text-red-700">${escapeHtml(err.message)}</div>`;
+        }
+    });
+
+    $('spans').addEventListener('click', (e) => {
+        const btn = e.target.closest('.span-toggle');
+        if (!btn) return;
+        const id = btn.getAttribute('data-span-id');
+        const detail = $('span-detail-' + id);
+        if (detail) detail.classList.toggle('hidden');
+    });
+
+    $('btn-copy').addEventListener('click', async () => {
+        if (!state.selectedTraceId) return;
+        await navigator.clipboard.writeText(state.selectedTraceId);
+    });
+
+    $('btn-raw').addEventListener('click', () => {
+        if (!state.selectedTraceId) return;
+        $('raw-panel').classList.toggle('hidden');
+    });
+    $('btn-raw-close').addEventListener('click', () => $('raw-panel').classList.add('hidden'));
+
+    $('btn-export').addEventListener('click', async () => {
+        if (!state.selectedTraceId) return;
+        $('btn-export').disabled = true;
+        try {
+            await fetchJson(API.export(state.selectedTraceId), { method: 'POST' });
+        } catch (e) {
+            alert('Export failed: ' + e.message);
+        } finally {
+            $('btn-export').disabled = false;
+        }
+    });
+
+    // Init
+    (function init() {
+        $('limit').value = String(DEFAULT_LIMIT);
+        refreshAll();
+    })();
+</script>
+</body>
+</html>
+
