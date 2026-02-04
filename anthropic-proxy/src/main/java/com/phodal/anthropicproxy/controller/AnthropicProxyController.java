@@ -2,6 +2,11 @@ package com.phodal.anthropicproxy.controller;
 
 import com.phodal.anthropicproxy.model.anthropic.AnthropicRequest;
 import com.phodal.anthropicproxy.model.anthropic.AnthropicResponse;
+import com.phodal.anthropicproxy.otel.model.Span;
+import com.phodal.anthropicproxy.otel.model.SpanKind;
+import com.phodal.anthropicproxy.otel.model.SpanStatus;
+import com.phodal.anthropicproxy.otel.model.Trace;
+import com.phodal.anthropicproxy.otel.service.ExporterService;
 import com.phodal.anthropicproxy.service.OpenAISdkService;
 import com.phodal.anthropicproxy.service.TraceService;
 import com.phodal.anthropicproxy.service.UserIdentificationService;
@@ -12,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.SignalType;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -31,6 +37,8 @@ public class AnthropicProxyController {
     private final OpenAISdkService sdkService;
     private final TraceService traceService;
     private final UserIdentificationService userIdentificationService;
+    private final com.phodal.anthropicproxy.otel.service.TraceService otelTraceService;
+    private final ExporterService exporterService;
 
     /**
      * Handle Anthropic Messages API requests
@@ -45,13 +53,28 @@ public class AnthropicProxyController {
         String apiKey = userIdentificationService.extractApiKey(httpRequest);
         Map<String, String> headers = userIdentificationService.collectHeaders(httpRequest);
 
-        log.info("Received request from user: {}, model: {}, stream: {}", userId, request.getModel(), request.getStream());
+        // Start OTEL trace
+        String traceId = otelTraceService.generateTraceId();
+        Trace trace = otelTraceService.startTrace(traceId);
 
-        // Start conversation and get conversationId for tracing
-        String conversationId = traceService.startConversation(userId, request, headers);
+        // Create root span for the request
+        Span rootSpan = otelTraceService.startSpan(traceId, "anthropic.messages", SpanKind.SERVER, null);
+        rootSpan.addAttribute("http.method", "POST");
+        rootSpan.addAttribute("http.route", "/anthropic/v1/messages");
+        rootSpan.addAttribute("model", request.getModel());
+        rootSpan.addAttribute("stream", request.getStream() != null ? request.getStream() : false);
+        rootSpan.addAttribute("user.id", userId);
+
+        log.info("Received request from user: {}, model: {}, stream: {}, traceId: {}", 
+                userId, request.getModel(), request.getStream(), traceId);
 
         if (apiKey == null || apiKey.isEmpty()) {
             log.error("No API key provided");
+            rootSpan.setStatus(SpanStatus.error("No API key provided"));
+            otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
+            otelTraceService.completeTrace(traceId);
+            exporterService.exportTrace(trace);
+            
             return ResponseEntity.status(401).body(Map.of(
                     "type", "error",
                     "error", Map.of(
@@ -61,12 +84,16 @@ public class AnthropicProxyController {
             ));
         }
 
+        // Start conversation and get conversationId for Agent Trace tracking
+        String conversationId = traceService.startConversation(userId, request, headers);
+        rootSpan.addAttribute("conversation.id", conversationId);
+
         // Handle streaming vs non-streaming
         if (Boolean.TRUE.equals(request.getStream())) {
-            handleStreamingRequest(request, userId, conversationId, apiKey, httpResponse);
+            handleStreamingRequest(request, userId, conversationId, apiKey, httpResponse, traceId, trace, rootSpan);
             return null;
         } else {
-            return handleNonStreamingRequest(request, userId, conversationId, apiKey);
+            return handleNonStreamingRequest(request, userId, conversationId, apiKey, traceId, trace, rootSpan);
         }
     }
 
@@ -74,15 +101,34 @@ public class AnthropicProxyController {
      * Handle non-streaming request
      */
     private ResponseEntity<?> handleNonStreamingRequest(
-            AnthropicRequest request, String userId, String conversationId, String apiKey) {
+            AnthropicRequest request, String userId, String conversationId, String apiKey,
+            String traceId, Trace trace, Span rootSpan) {
+
+        // Create span for API call
+        Span apiSpan = otelTraceService.startSpan(traceId, "anthropic.api.call", SpanKind.CLIENT, rootSpan.getSpanId());
+        apiSpan.addAttribute("api.endpoint", "messages");
+        apiSpan.addAttribute("api.model", request.getModel());
+
         try {
             AnthropicResponse response = sdkService.sendRequest(request, userId, conversationId, apiKey).block();
-            // End conversation to generate trace
-            traceService.endConversation(conversationId);
+
+            // Add response attributes
+            apiSpan.addAttribute("response.id", response != null ? response.getId() : "unknown");
+            if (response != null && response.getUsage() != null) {
+                apiSpan.addAttribute("tokens.input", response.getUsage().getInputTokens());
+                apiSpan.addAttribute("tokens.output", response.getUsage().getOutputTokens());
+            }
+
+            apiSpan.setStatus(SpanStatus.ok());
+            rootSpan.setStatus(SpanStatus.ok());
+
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             log.error("Error handling non-streaming request: {}", e.getMessage(), e);
-            traceService.endConversation(conversationId);
+
+            apiSpan.setStatus(SpanStatus.error(e.getMessage()));
+            rootSpan.setStatus(SpanStatus.error(e.getMessage()));
+
             return ResponseEntity.internalServerError().body(Map.of(
                     "type", "error",
                     "error", Map.of(
@@ -90,6 +136,16 @@ public class AnthropicProxyController {
                             "message", e.getMessage() != null ? e.getMessage() : "Unknown error"
                     )
             ));
+        } finally {
+            otelTraceService.endSpan(apiSpan, apiSpan.getStatus());
+            otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
+
+            // End conversation to generate Agent Trace record (if any)
+            traceService.endConversation(conversationId);
+
+            // Complete OTEL trace and export using captured reference
+            otelTraceService.completeTrace(traceId);
+            exporterService.exportTrace(trace);
         }
     }
 
@@ -98,7 +154,13 @@ public class AnthropicProxyController {
      */
     private void handleStreamingRequest(
             AnthropicRequest request, String userId, String conversationId, String apiKey,
-            HttpServletResponse httpResponse) throws IOException {
+            HttpServletResponse httpResponse, String traceId, Trace trace, Span rootSpan) throws IOException {
+
+        // Create span for streaming API call
+        Span streamSpan = otelTraceService.startSpan(traceId, "anthropic.api.stream", SpanKind.CLIENT, rootSpan.getSpanId());
+        streamSpan.addAttribute("api.endpoint", "messages");
+        streamSpan.addAttribute("api.model", request.getModel());
+        streamSpan.addAttribute("streaming", true);
 
         httpResponse.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
         httpResponse.setCharacterEncoding("UTF-8");
@@ -116,14 +178,36 @@ public class AnthropicProxyController {
                     })
                     .doOnError(e -> {
                         log.error("Error in streaming: {}", e.getMessage());
-                        writer.print("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"" + e.getMessage().replace("\"", "\\\"") + "\"}}\n\n");
+                        String msg = e.getMessage() != null ? e.getMessage() : "Unknown error";
+                        writer.print("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"" + msg.replace("\"", "\\\"") + "\"}}\n\n");
                         writer.flush();
+
+                        streamSpan.setStatus(SpanStatus.error(e.getMessage()));
+                        rootSpan.setStatus(SpanStatus.error(e.getMessage()));
+                    })
+                    .doFinally(signalType -> {
+                        if (signalType == SignalType.ON_COMPLETE) {
+                            streamSpan.setStatus(SpanStatus.ok());
+                            rootSpan.setStatus(SpanStatus.ok());
+                        } else if (streamSpan.getStatus() == null) {
+                            streamSpan.setStatus(SpanStatus.error("Streaming terminated: " + signalType));
+                            rootSpan.setStatus(SpanStatus.error("Streaming terminated: " + signalType));
+                        }
+
+                        // Always end spans and complete/export the OTEL trace to avoid leaks.
+                        otelTraceService.endSpan(streamSpan, streamSpan.getStatus());
+                        otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
+                        otelTraceService.completeTrace(traceId);
+                        exporterService.exportTrace(trace);
+
+                        // Ensure conversation is ended on non-complete signals (errors/cancel).
+                        if (signalType != SignalType.ON_COMPLETE) {
+                            traceService.endConversation(conversationId);
+                        }
                     })
                     .blockLast();
         } catch (Exception e) {
             log.error("Error handling streaming request: {}", e.getMessage(), e);
-            writer.print("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"" + (e.getMessage() != null ? e.getMessage().replace("\"", "\\\"") : "Unknown error") + "\"}}\n\n");
-            writer.flush();
         }
     }
 

@@ -11,6 +11,21 @@ proxy:
     api-key: ${OPENAI_API_KEY:}
     timeout: 300000
 
+# OpenTelemetry Configuration
+otel:
+  exporter:
+    # Console exporter (enabled by default for debugging)
+    console:
+      enabled: true
+    # Jaeger exporter
+    jaeger:
+      enabled: ${OTEL_JAEGER_ENABLED:false}
+      endpoint: ${OTEL_JAEGER_ENDPOINT:http://localhost:14250}
+    # Zipkin exporter
+    zipkin:
+      enabled: ${OTEL_ZIPKIN_ENABLED:false}
+      endpoint: ${OTEL_ZIPKIN_ENDPOINT:http://localhost:9411}
+
 management:
   endpoints:
     web:
