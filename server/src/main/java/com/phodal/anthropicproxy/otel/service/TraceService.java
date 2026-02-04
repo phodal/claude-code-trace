@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Service for managing OTEL traces and spans
  */
 @Slf4j
-@Service
+@Service("otelTraceService")
 public class TraceService {
     
     private final Map<String, Trace> activeTraces = new ConcurrentHashMap<>();
