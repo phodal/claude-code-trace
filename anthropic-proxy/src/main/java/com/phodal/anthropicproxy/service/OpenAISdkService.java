@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 
 /**
  * Service using official OpenAI Java SDK for API calls
+ * Records traces using Agent Trace specification
  */
 @Slf4j
 @Service
@@ -32,15 +33,15 @@ public class OpenAISdkService {
 
     private final String baseUrl;
     private final ObjectMapper objectMapper;
-    private final MetricsService metricsService;
+    private final TraceService traceService;
 
     public OpenAISdkService(
             @Value("${proxy.openai.base-url}") String baseUrl,
             ObjectMapper objectMapper,
-            MetricsService metricsService) {
+            TraceService traceService) {
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        this.metricsService = metricsService;
+        this.traceService = traceService;
     }
 
     private OpenAIClient createClient(String apiKey) {
@@ -53,7 +54,7 @@ public class OpenAISdkService {
     /**
      * Send non-streaming request using OpenAI SDK
      */
-    public Mono<AnthropicResponse> sendRequest(AnthropicRequest anthropicRequest, String userId, String turnId, String apiKey) {
+    public Mono<AnthropicResponse> sendRequest(AnthropicRequest anthropicRequest, String userId, String conversationId, String apiKey) {
         return Mono.fromCallable(() -> {
             long startTime = System.currentTimeMillis();
             OpenAIClient client = createClient(apiKey);
@@ -61,7 +62,26 @@ public class OpenAISdkService {
             
             ChatCompletion completion = client.chat().completions().create(params);
             long latencyMs = System.currentTimeMillis() - startTime;
-            metricsService.recordSdkResponse(userId, turnId, completion, latencyMs);
+            
+            // Record response metrics
+            int promptTokens = 0, completionTokens = 0;
+            if (completion.usage().isPresent()) {
+                promptTokens = (int) completion.usage().get().promptTokens();
+                completionTokens = (int) completion.usage().get().completionTokens();
+            }
+            traceService.recordResponse(conversationId, promptTokens, completionTokens, latencyMs);
+            
+            // Record tool calls
+            ChatCompletionMessage message = completion.choices().get(0).message();
+            message.toolCalls().ifPresent(toolCalls -> {
+                for (var toolCall : toolCalls) {
+                    toolCall.function().ifPresent(func -> {
+                        traceService.recordToolCall(conversationId, 
+                            func.function().name(), 
+                            func.function().arguments());
+                    });
+                }
+            });
             
             return convertToAnthropicResponse(completion, anthropicRequest.getModel());
         }).subscribeOn(Schedulers.boundedElastic());
@@ -70,7 +90,7 @@ public class OpenAISdkService {
     /**
      * Send streaming request using OpenAI SDK
      */
-    public Flux<String> sendStreamingRequest(AnthropicRequest anthropicRequest, String userId, String turnId, String apiKey) {
+    public Flux<String> sendStreamingRequest(AnthropicRequest anthropicRequest, String userId, String conversationId, String apiKey) {
         return Flux.<String>create(sink -> {
             long startTime = System.currentTimeMillis();
             try {
@@ -295,7 +315,7 @@ public class OpenAISdkService {
                     }
                     
                     long latencyMs = System.currentTimeMillis() - startTime;
-                    metricsService.recordStreamingToolCalls(userId, turnId, collectedToolCalls, latencyMs);
+                    traceService.recordStreamingToolCalls(userId, conversationId, collectedToolCalls, latencyMs);
                     sink.complete();
                 }
             } catch (Exception e) {
