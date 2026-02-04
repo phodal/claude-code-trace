@@ -326,19 +326,28 @@
                 return;
             }
             
-            tbody.innerHTML = turns.map(turn => `
+            tbody.innerHTML = turns.map(turn => {
+                // Generate better preview when lastUserMessagePreview is empty
+                const messagePreview = turn.lastUserMessagePreview && turn.lastUserMessagePreview.trim() !== '' && turn.lastUserMessagePreview !== 'null'
+                    ? turn.lastUserMessagePreview
+                    : (turn.toolCalls && turn.toolCalls.length > 0 
+                        ? `[${turn.toolCalls.length} tool call${turn.toolCalls.length > 1 ? 's' : ''}: ${turn.toolCalls.map(tc => tc.name || 'unknown').slice(0, 3).join(', ')}${turn.toolCalls.length > 3 ? '...' : ''}]`
+                        : '[No message content]');
+                
+                const total = Number(turn.toolCallCountTotal || 0);
+                const nonEdit = Number(turn.toolCallCount || 0);
+                const edit = Number(turn.editToolCallCount || 0);
+                
+                return `
                 <tr class="expandable-row" onclick="toggleTurnDetail('${turn.turnId}')">
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${formatTime(turn.timestamp)}</td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${truncate(turn.userId, 15)}</td>
                     <td class="px-4 py-3 text-sm text-gray-500 max-w-xs">
-                        <div class="message-preview-cell" data-turn-id="${turn.turnId}" data-preview-message="${escapeHtml(turn.lastUserMessagePreview || '')}">${escapeHtml(truncate(turn.lastUserMessagePreview || '-', 50))}</div>
+                        <div class="message-preview-cell" data-turn-id="${turn.turnId}" data-preview-message="${escapeHtml(messagePreview)}">${escapeHtml(truncate(messagePreview, 50))}</div>
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${turn.model || '-'}</td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm">
                         ${(() => {
-                            const total = Number(turn.toolCallCountTotal || 0);
-                            const nonEdit = Number(turn.toolCallCount || 0);
-                            const edit = Number(turn.editToolCallCount || 0);
                             if (total <= 0 && nonEdit <= 0 && edit <= 0) return '<span class="text-gray-400">-</span>';
                             const totalBadge = total > 0 ? `<span class="tool-badge">${total} total</span>` : '';
                             const nonEditBadge = nonEdit > 0 ? `<span class="tool-badge ml-2">${nonEdit} non-edit</span>` : `<span class="text-gray-400 ml-2">0 non-edit</span>`;
@@ -356,7 +365,8 @@
                         ${renderToolCalls(turn.toolCalls || [])}
                     </td>
                 </tr>
-            `).join('');
+            `;
+            }).join('');
         }
         
         function renderToolCalls(toolCalls) {
@@ -428,11 +438,27 @@
             return html;
         }
         
+        // Track currently expanded turn detail row
+        let currentlyExpandedTurnId = null;
+        
         function toggleTurnDetail(turnId) {
             const detailRow = document.getElementById('detail-' + turnId);
-            if (detailRow) {
-                detailRow.classList.toggle('hidden');
+            if (!detailRow) return;
+            
+            // If clicking on a different row, close the previously expanded one
+            if (currentlyExpandedTurnId && currentlyExpandedTurnId !== turnId) {
+                const prevRow = document.getElementById('detail-' + currentlyExpandedTurnId);
+                if (prevRow) {
+                    prevRow.classList.add('hidden');
+                }
             }
+            
+            // Toggle current row
+            const isCurrentlyHidden = detailRow.classList.contains('hidden');
+            detailRow.classList.toggle('hidden');
+            
+            // Update tracking
+            currentlyExpandedTurnId = isCurrentlyHidden ? turnId : null;
         }
         
         // Load sessions data
@@ -494,9 +520,27 @@
             }).join('');
         }
 
+        // Track currently expanded OTEL chain detail row
+        let currentlyExpandedOtelChainId = null;
+        
         function toggleOtelChainDetail(chainId) {
-            const row = document.getElementById('otel-detail-' + chainId);
-            if (row) row.classList.toggle('hidden');
+            const detailRow = document.getElementById('otel-detail-' + chainId);
+            if (!detailRow) return;
+            
+            // If clicking on a different row, close the previously expanded one
+            if (currentlyExpandedOtelChainId && currentlyExpandedOtelChainId !== chainId) {
+                const prevRow = document.getElementById('otel-detail-' + currentlyExpandedOtelChainId);
+                if (prevRow) {
+                    prevRow.classList.add('hidden');
+                }
+            }
+            
+            // Toggle current row
+            const isCurrentlyHidden = detailRow.classList.contains('hidden');
+            detailRow.classList.toggle('hidden');
+            
+            // Update tracking
+            currentlyExpandedOtelChainId = isCurrentlyHidden ? chainId : null;
         }
 
         function renderOtelChainTraces(traces) {
