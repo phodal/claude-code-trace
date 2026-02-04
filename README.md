@@ -32,6 +32,7 @@
 - **会话跟踪**：细粒度的 Session/Turn/Message 级别指标跟踪
 - **工具调用详情**：记录每次工具调用的参数、耗时和代码修改行数
 - **响应式架构**：基于 Spring WebFlux 的非阻塞架构
+- **OpenTelemetry 集成**：完整的分布式追踪支持，兼容 Jaeger、Zipkin 等监控工具
 
 ## 快速开始
 
@@ -127,6 +128,31 @@ curl http://localhost:8080/anthropic/health
 ```
 
 ## 监控指标
+
+### OpenTelemetry 追踪
+
+访问 OpenTelemetry API 端点查看分布式追踪：
+
+```bash
+# 获取最近的追踪
+curl http://localhost:8080/otel/traces?limit=50
+
+# 获取特定追踪详情
+curl http://localhost:8080/otel/traces/{traceId}
+
+# 导出追踪到 Jaeger/Zipkin
+curl -X POST http://localhost:8080/otel/traces/{traceId}/export
+
+# 查看导出器状态
+curl http://localhost:8080/otel/exporters
+```
+
+支持的导出器：
+- **Console**: 输出到控制台日志（默认启用）
+- **Jaeger**: 导出到 Jaeger（需配置）
+- **Zipkin**: 导出到 Zipkin（需配置）
+
+详细配置请参考 [OTEL_INTEGRATION.md](./OTEL_INTEGRATION.md)
 
 ### 仪表板
 

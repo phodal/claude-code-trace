@@ -87,6 +87,46 @@
             <version>${lombok.version}</version>
             <optional>true</optional>
         </dependency>
+
+        <!-- OpenTelemetry API -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>1.32.0</version>
+        </dependency>
+
+        <!-- OpenTelemetry SDK -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+            <version>1.32.0</version>
+        </dependency>
+
+        <!-- OpenTelemetry Exporters -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-jaeger</artifactId>
+            <version>1.32.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-zipkin</artifactId>
+            <version>1.32.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-logging</artifactId>
+            <version>1.32.0</version>
+        </dependency>
+
+        <!-- OpenTelemetry Semantic Conventions -->
+        <dependency>
+            <groupId>io.opentelemetry.semconv</groupId>
+            <artifactId>opentelemetry-semconv</artifactId>
+            <version>1.21.0-alpha</version>
+        </dependency>
     </dependencies>
 
     <build>
