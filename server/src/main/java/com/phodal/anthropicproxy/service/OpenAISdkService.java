@@ -9,6 +9,7 @@ import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.*;
 import com.openai.models.completions.CompletionUsage;
+import com.openai.models.chat.completions.ChatCompletionStreamOptions;
 import com.phodal.anthropicproxy.model.anthropic.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -105,7 +106,10 @@ public class OpenAISdkService {
                 // Stream state - match Python proxy behavior
                 boolean[] messageStartSent = {false};
                 String[] finalStopReason = {"end_turn"};
-                boolean[] shouldStopReading = {false};
+                // We must keep reading upstream until it finishes, because some providers (e.g. MiniMax)
+                // only return usage in a final summary chunk. We can stop EMITTING to the client early,
+                // but should not stop READING from upstream.
+                boolean[] shouldStopEmitting = {false};
                 int[] textBlockIndex = {0};
                 int[] toolBlockCounter = {0};
                 boolean[] textBlockHasContent = {false};  // Track if text block received any content
@@ -116,6 +120,9 @@ public class OpenAISdkService {
                 // Track tool calls by OpenAI index, matching Python's current_tool_calls dict
                 Map<Integer, ToolCallState> currentToolCalls = new HashMap<>();
                 List<ToolCallInfo> collectedToolCalls = new ArrayList<>();
+                // Track token usage from streaming response
+                int[] promptTokens = {0};
+                int[] completionTokens = {0};
 
                 try (StreamResponse<ChatCompletionChunk> stream = 
                         client.chat().completions().createStreaming(params)) {
@@ -124,7 +131,7 @@ public class OpenAISdkService {
                     while (iterator.hasNext()) {
                         ChatCompletionChunk chunk = iterator.next();
                         List<String> events = new ArrayList<>();
-
+                        
                         // Send initial events on first chunk (match Python/Anthropic behavior)
                         if (!messageStartSent[0]) {
                             messageStartSent[0] = true;
@@ -141,6 +148,22 @@ public class OpenAISdkService {
                             )));
                             // Anthropic sends a ping early; some clients behave better with it.
                             events.add(formatSSE(Map.of("type", "ping")));
+                        }
+
+                        // Extract usage information if present
+                        chunk.usage().ifPresent(usage -> {
+                            promptTokens[0] = (int) usage.promptTokens();
+                            completionTokens[0] = (int) usage.completionTokens();
+                            if (log.isDebugEnabled()) {
+                                log.debug("Streaming usage: prompt={}, completion={}, total={}",
+                                        promptTokens[0], completionTokens[0], promptTokens[0] + completionTokens[0]);
+                            }
+                        });
+
+                        // After we've seen a finish reason, keep reading to capture trailing usage,
+                        // but do not emit any more content/tool deltas to the client.
+                        if (shouldStopEmitting[0]) {
+                            continue;
                         }
 
                         if (chunk.choices().isEmpty()) continue;
@@ -261,8 +284,9 @@ public class OpenAISdkService {
                             } else {
                                 finalStopReason[0] = "end_turn";
                             }
-                            // Important: stop reading upstream stream immediately.
-                            shouldStopReading[0] = true;
+                            // Stop emitting further deltas to the client, but keep reading upstream
+                            // until completion to capture trailing usage chunks.
+                            shouldStopEmitting[0] = true;
                         });
 
                         if (!events.isEmpty()) {
@@ -271,9 +295,6 @@ public class OpenAISdkService {
                                 log.debug("Sending SSE events: {}", joined.replace("\n", "\\n"));
                             }
                             sink.next(joined);
-                        }
-                        if (shouldStopReading[0]) {
-                            break;
                         }
                     }
 
@@ -307,7 +328,7 @@ public class OpenAISdkService {
                     finalOut.append(formatSSE(Map.of(
                         "type", "message_delta",
                         "delta", deltaContent,
-                        "usage", Map.of("input_tokens", 0, "output_tokens", 0)
+                        "usage", Map.of("input_tokens", promptTokens[0], "output_tokens", completionTokens[0])
                     )));
                     finalOut.append(formatSSE(Map.of("type", "message_stop")));
                     // Note: Python version does NOT send "data: [DONE]" - removed to match
@@ -317,6 +338,8 @@ public class OpenAISdkService {
                     }
                     
                     long latencyMs = System.currentTimeMillis() - startTime;
+                    // Record response metrics (tokens and latency)
+                    traceService.recordResponse(conversationId, promptTokens[0], completionTokens[0], latencyMs);
                     // Record tool calls but do NOT end conversation here.
                     // Conversation lifecycle is managed by the Controller.
                     traceService.recordStreamingToolCallsOnly(userId, conversationId, collectedToolCalls, latencyMs);
@@ -352,6 +375,13 @@ public class OpenAISdkService {
     private ChatCompletionCreateParams buildChatCompletionParams(AnthropicRequest request) {
         ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                 .model(request.getModel());
+
+        // Enable usage tracking in streaming responses
+        if (Boolean.TRUE.equals(request.getStream())) {
+            builder.streamOptions(ChatCompletionStreamOptions.builder()
+                    .includeUsage(true)
+                    .build());
+        }
 
         // System message
         String systemText = extractSystemText(request.getSystem());

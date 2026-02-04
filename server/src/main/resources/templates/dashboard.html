@@ -207,12 +207,13 @@
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Messages</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tool Calls</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg TC/Message</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tokens (In/Out)</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lines Modified</th>
                             </tr>
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200" id="sessions-body">
                             <tr>
-                                <td colspan="7" class="px-4 py-4 text-center text-gray-500">Loading...</td>
+                                <td colspan="8" class="px-4 py-4 text-center text-gray-500">Loading...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -665,7 +666,7 @@
         function renderSessions(sessions) {
             const tbody = document.getElementById('sessions-body');
             if (sessions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-500">No sessions yet</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-4 text-center text-gray-500">No sessions yet</td></tr>';
                 return;
             }
             
@@ -679,6 +680,9 @@
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${s.totalToolCalls}</td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${s.avgToolCallsPerTurn.toFixed(1)}</td>
+                    <td class="px-4 py-3 whitespace-nowrap text-sm">
+                        <span class="text-purple-600">${(s.totalPromptTokens || 0).toLocaleString()}</span> / <span class="text-orange-600">${(s.totalCompletionTokens || 0).toLocaleString()}</span>
+                    </td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-green-600">${s.totalLinesModified}</td>
                 </tr>
             `).join('');

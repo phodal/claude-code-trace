@@ -403,6 +403,8 @@ public class MetricsDashboardController {
             // Aggregate metrics
             long totalToolCalls = 0;
             long totalLinesModified = 0;
+            long totalPromptTokens = 0;
+            long totalCompletionTokens = 0;
             int errorCount = 0;
             
             for (Map<String, Object> turn : userTurns) {
@@ -410,6 +412,10 @@ public class MetricsDashboardController {
                 if (tc instanceof Number) totalToolCalls += ((Number) tc).longValue();
                 Object lm = turn.get("linesModified");
                 if (lm instanceof Number) totalLinesModified += ((Number) lm).longValue();
+                Object pt = turn.get("promptTokens");
+                if (pt instanceof Number) totalPromptTokens += ((Number) pt).longValue();
+                Object ct = turn.get("completionTokens");
+                if (ct instanceof Number) totalCompletionTokens += ((Number) ct).longValue();
             }
             
             Map<String, Object> session = new HashMap<>();
@@ -420,6 +426,9 @@ public class MetricsDashboardController {
             session.put("turnCount", userTurns.size());
             session.put("totalToolCalls", totalToolCalls);
             session.put("avgToolCallsPerTurn", userTurns.size() > 0 ? (double) totalToolCalls / userTurns.size() : 0.0);
+            session.put("totalPromptTokens", totalPromptTokens);
+            session.put("totalCompletionTokens", totalCompletionTokens);
+            session.put("totalTokens", totalPromptTokens + totalCompletionTokens);
             session.put("totalLinesModified", totalLinesModified);
             session.put("errorCount", errorCount);
             

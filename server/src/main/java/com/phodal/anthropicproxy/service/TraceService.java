@@ -137,7 +137,9 @@ public class TraceService {
                 .model(model)
                 .normalizedModelId(normalizedModelId)
                 .startTime(Instant.now())
-                .lastUserMessage(extractLastUserMessage(request))
+                // Prefer last user message, but fall back to any textual message/system
+                // so the dashboard doesn't show empty previews for some clients.
+                .lastUserMessage(extractBestEffortPrompt(request))
                 .stream(Boolean.TRUE.equals(request.getStream()))
                 .build();
 
@@ -723,27 +725,89 @@ public class TraceService {
         for (int i = request.getMessages().size() - 1; i >= 0; i--) {
             AnthropicMessage msg = request.getMessages().get(i);
             if ("user".equals(msg.getRole())) {
-                Object content = msg.getContent();
-                if (content instanceof String) {
-                    return (String) content;
-                } else if (content instanceof List) {
-                    StringBuilder sb = new StringBuilder();
-                    try {
-                        @SuppressWarnings("unchecked")
-                        List<Map<String, Object>> blocks = (List<Map<String, Object>>) content;
-                        for (Map<String, Object> block : blocks) {
-                            if ("text".equals(block.get("type")) && block.get("text") != null) {
-                                sb.append(block.get("text")).append(" ");
-                            }
-                        }
-                    } catch (Exception e) {
-                        log.debug("Failed to parse content blocks: {}", e.getMessage());
-                    }
-                    return sb.toString().trim();
-                }
+                return extractTextFromContent(msg.getContent());
             }
         }
         return "";
+    }
+
+    /**
+     * Best-effort prompt extraction for dashboard display.
+     * Some clients may put the "prompt" into system blocks or use non-standard roles.
+     */
+    private String extractBestEffortPrompt(AnthropicRequest request) {
+        // 1) Prefer last user message
+        String user = extractLastUserMessage(request);
+        if (user != null && !user.isBlank()) return user;
+
+        // 2) Fall back to last textual message of any role (user/assistant/etc.)
+        if (request != null && request.getMessages() != null) {
+            for (int i = request.getMessages().size() - 1; i >= 0; i--) {
+                AnthropicMessage msg = request.getMessages().get(i);
+                if (msg == null) continue;
+                String text = extractTextFromContent(msg.getContent());
+                if (text != null && !text.isBlank()) return text;
+            }
+        }
+
+        // 3) Fall back to system prompt text
+        String sys = extractSystemTextLite(request != null ? request.getSystem() : null);
+        return sys != null ? sys : "";
+    }
+
+    private String extractTextFromContent(Object content) {
+        if (content == null) return "";
+        if (content instanceof String s) return s;
+        if (content instanceof List<?> list) {
+            StringBuilder sb = new StringBuilder();
+            try {
+                for (Object item : list) {
+                    if (item == null) continue;
+                    if (item instanceof Map<?, ?> map) {
+                        Object type = map.get("type");
+                        Object text = map.get("text");
+                        if ("text".equals(String.valueOf(type)) && text != null) {
+                            sb.append(text).append(" ");
+                        }
+                    } else if (item instanceof com.phodal.anthropicproxy.model.anthropic.AnthropicContent ac) {
+                        if ("text".equals(ac.getType()) && ac.getText() != null) {
+                            sb.append(ac.getText()).append(" ");
+                        }
+                    } else if (item instanceof String s && !s.isBlank()) {
+                        sb.append(s).append(" ");
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("Failed to parse content blocks: {}", e.getMessage());
+            }
+            return sb.toString().trim();
+        }
+        return "";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String extractSystemTextLite(Object system) {
+        if (system == null) return "";
+        if (system instanceof String s) return s;
+        if (system instanceof List<?> blocks) {
+            StringBuilder sb = new StringBuilder();
+            for (Object block : blocks) {
+                if (block instanceof Map<?, ?> map) {
+                    Object text = ((Map<String, Object>) map).get("text");
+                    if (text != null) {
+                        if (!sb.isEmpty()) sb.append("\n");
+                        sb.append(text);
+                    }
+                } else if (block instanceof com.phodal.anthropicproxy.model.anthropic.AnthropicContent ac) {
+                    if ("text".equals(ac.getType()) && ac.getText() != null) {
+                        if (!sb.isEmpty()) sb.append("\n");
+                        sb.append(ac.getText());
+                    }
+                }
+            }
+            return sb.toString();
+        }
+        return String.valueOf(system);
     }
 
     private boolean isEditTool(String toolName) {
