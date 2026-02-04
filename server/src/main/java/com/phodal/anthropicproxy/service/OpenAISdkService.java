@@ -76,8 +76,10 @@ public class OpenAISdkService {
             message.toolCalls().ifPresent(toolCalls -> {
                 for (var toolCall : toolCalls) {
                     toolCall.function().ifPresent(func -> {
-                        traceService.recordToolCall(conversationId, 
-                            func.function().name(), 
+                        // Preserve tool call id so we can correlate tool_use -> tool_result across requests.
+                        traceService.recordToolCall(conversationId,
+                            func.id(),
+                            func.function().name(),
                             func.function().arguments());
                     });
                 }

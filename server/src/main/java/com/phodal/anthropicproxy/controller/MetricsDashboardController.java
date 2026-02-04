@@ -2,6 +2,10 @@ package com.phodal.anthropicproxy.controller;
 
 import com.phodal.agenttrace.model.TraceRecord;
 import com.phodal.anthropicproxy.service.TraceService;
+import com.phodal.anthropicproxy.otel.model.Span;
+import com.phodal.anthropicproxy.otel.model.Trace;
+import com.phodal.anthropicproxy.otel.service.OtelTraceService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
@@ -22,6 +26,8 @@ import java.util.stream.Collectors;
 public class MetricsDashboardController {
 
     private final TraceService traceService;
+    private final OtelTraceService otelTraceService;
+    private final ObjectMapper objectMapper;
 
     /**
      * Main dashboard page
@@ -78,6 +84,126 @@ public class MetricsDashboardController {
         return traceService.getRecentTraces(limit).stream()
                 .map(this::traceRecordToMap)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * JSON API: linked OTEL chains ("turns") inferred from tool_use_id emitted/consumed.
+     * This groups multiple /messages calls into a chain using:
+     * - tool.use_ids.emitted (from response/tool_use)
+     * - tool.use_ids.consumed (from request/tool_result.tool_use_id)
+     */
+    @GetMapping("/api/otel/chains")
+    @ResponseBody
+    public Map<String, Object> getOtelChains(@RequestParam(defaultValue = "200") int limit) {
+        List<Trace> traces = otelTraceService.getRecentTraces(limit);
+        // Most recent first from service; reverse to process in time order
+        List<Trace> ordered = new ArrayList<>(traces);
+        Collections.reverse(ordered);
+
+        // Build per-trace info
+        Map<String, OtelTraceInfo> infoByTraceId = new LinkedHashMap<>();
+        Map<String, String> emittedToProducerTrace = new HashMap<>(); // tool_use_id -> traceId
+
+        for (Trace t : ordered) {
+            Span root = t.getRootSpan();
+            if (root == null) continue;
+            Map<String, Object> attrs = root.getAttributes() != null ? root.getAttributes() : Map.of();
+
+            OtelTraceInfo info = new OtelTraceInfo();
+            info.traceId = t.getTraceId();
+            info.startTime = root.getStartTime() != null ? root.getStartTime().toString() : null;
+            info.userId = str(attrs.get("user.id"));
+            info.model = str(attrs.get("model"));
+            info.route = str(attrs.get("http.route"));
+            info.conversationId = str(attrs.get("conversation.id"));
+            info.emitted = splitIds(str(attrs.get("tool.use_ids.emitted")));
+            info.consumed = splitIds(str(attrs.get("tool.use_ids.consumed")));
+            info.toolCallsSummaryJson = str(attrs.get("tool.calls.summary"));
+            info.toolCallsCount = intVal(attrs.get("tool.calls.count"));
+
+            infoByTraceId.put(info.traceId, info);
+
+            for (String id : info.emitted) {
+                // last-wins if duplicated; should be rare
+                emittedToProducerTrace.put(id, info.traceId);
+            }
+        }
+
+        // Build edges: producerTraceId -> consumerTraceId
+        Map<String, Set<String>> edges = new HashMap<>();
+        Map<String, Set<String>> reverseEdges = new HashMap<>();
+        for (OtelTraceInfo info : infoByTraceId.values()) {
+            for (String consumedId : info.consumed) {
+                String producer = emittedToProducerTrace.get(consumedId);
+                if (producer == null) continue;
+                if (producer.equals(info.traceId)) continue;
+                edges.computeIfAbsent(producer, k -> new LinkedHashSet<>()).add(info.traceId);
+                reverseEdges.computeIfAbsent(info.traceId, k -> new LinkedHashSet<>()).add(producer);
+            }
+        }
+
+        // Connected components (undirected) to form "chains"
+        Set<String> visited = new HashSet<>();
+        List<Map<String, Object>> chains = new ArrayList<>();
+        for (String traceId : infoByTraceId.keySet()) {
+            if (visited.contains(traceId)) continue;
+            // BFS component
+            Deque<String> dq = new ArrayDeque<>();
+            dq.add(traceId);
+            visited.add(traceId);
+            List<String> component = new ArrayList<>();
+            while (!dq.isEmpty()) {
+                String cur = dq.removeFirst();
+                component.add(cur);
+                for (String nxt : edges.getOrDefault(cur, Set.of())) {
+                    if (visited.add(nxt)) dq.addLast(nxt);
+                }
+                for (String prev : reverseEdges.getOrDefault(cur, Set.of())) {
+                    if (visited.add(prev)) dq.addLast(prev);
+                }
+            }
+            // Sort component by time (startTime string is ISO-ish)
+            component.sort(Comparator.comparing(id -> Optional.ofNullable(infoByTraceId.get(id)).map(i -> i.startTime).orElse("")));
+
+            Map<String, Object> chain = new LinkedHashMap<>();
+            chain.put("chainId", component.get(0));
+            chain.put("traceCount", component.size());
+            chain.put("traces", component.stream().map(id -> otelTraceInfoToMap(infoByTraceId.get(id))).toList());
+            chain.put("startTime", infoByTraceId.get(component.get(0)).startTime);
+            chain.put("endTime", infoByTraceId.get(component.get(component.size() - 1)).startTime);
+
+            // Aggregate basic fields (best-effort)
+            OtelTraceInfo first = infoByTraceId.get(component.get(0));
+            OtelTraceInfo last = infoByTraceId.get(component.get(component.size() - 1));
+            chain.put("userId", first.userId != null ? first.userId : last.userId);
+            chain.put("model", first.model != null ? first.model : last.model);
+            chain.put("route", first.route != null ? first.route : last.route);
+
+            // Aggregate emitted/consumed sets
+            Set<String> allEmitted = new LinkedHashSet<>();
+            Set<String> allConsumed = new LinkedHashSet<>();
+            int toolCallsTotal = 0;
+            for (String id : component) {
+                OtelTraceInfo ti = infoByTraceId.get(id);
+                allEmitted.addAll(ti.emitted);
+                allConsumed.addAll(ti.consumed);
+                toolCallsTotal += Math.max(0, ti.toolCallsCount);
+            }
+            chain.put("toolUseEmittedCount", allEmitted.size());
+            chain.put("toolUseConsumedCount", allConsumed.size());
+            chain.put("toolCallsTotal", toolCallsTotal);
+
+            chains.add(chain);
+        }
+
+        // newest chains first
+        Collections.reverse(chains);
+
+        return Map.of(
+                "totalTraces", infoByTraceId.size(),
+                "totalChains", chains.size(),
+                "chains", chains
+        );
     }
 
     /**
@@ -193,6 +319,69 @@ public class MetricsDashboardController {
                 .collect(Collectors.toList()));
         
         return map;
+    }
+
+    private Map<String, Object> otelTraceInfoToMap(OtelTraceInfo info) {
+        if (info == null) return Map.of();
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("traceId", info.traceId);
+        m.put("startTime", info.startTime);
+        m.put("userId", info.userId);
+        m.put("model", info.model);
+        m.put("route", info.route);
+        m.put("conversationId", info.conversationId);
+        m.put("emitted", info.emitted);
+        m.put("consumed", info.consumed);
+        m.put("toolCallsCount", info.toolCallsCount);
+        m.put("toolCalls", parseToolCallsSummary(info.toolCallsSummaryJson));
+        return m;
+    }
+
+    private List<Map<String, Object>> parseToolCallsSummary(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return objectMapper.readValue(json, List.class);
+        } catch (Exception e) {
+            return List.of(Map.of("error", "failed_to_parse_tool_calls_summary"));
+        }
+    }
+
+    private static List<String> splitIds(String csv) {
+        if (csv == null || csv.isBlank()) return List.of();
+        return Arrays.stream(csv.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .toList();
+    }
+
+    private static String str(Object o) {
+        if (o == null) return null;
+        String s = String.valueOf(o);
+        return s.isBlank() ? null : s;
+    }
+
+    private static int intVal(Object o) {
+        if (o == null) return 0;
+        if (o instanceof Number n) return n.intValue();
+        try {
+            return Integer.parseInt(String.valueOf(o));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static class OtelTraceInfo {
+        String traceId;
+        String startTime;
+        String userId;
+        String model;
+        String route;
+        String conversationId;
+        List<String> emitted = List.of();
+        List<String> consumed = List.of();
+        int toolCallsCount;
+        String toolCallsSummaryJson;
     }
 
     private Map<String, Object> traceRecordToDetailMap(TraceRecord trace) {

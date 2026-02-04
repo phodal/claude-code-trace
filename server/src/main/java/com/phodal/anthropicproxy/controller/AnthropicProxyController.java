@@ -22,7 +22,11 @@ import reactor.core.publisher.SignalType;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Controller to handle Anthropic API proxy requests.
@@ -40,6 +44,26 @@ public class AnthropicProxyController {
     private final UserIdentificationService userIdentificationService;
     private final OtelTraceService otelTraceService;
     private final ExporterService exporterService;
+    
+    // Whitelist only (avoid recording sensitive headers)
+    private static final Set<String> CORRELATION_HEADER_KEYS = Set.of(
+            "x-request-id",
+            "x-correlation-id",
+            "x-session-id",
+            "x-conversation-id",
+            "x-turn-id",
+            "traceparent",
+            "tracestate",
+            "user-agent",
+            "anthropic-version",
+            "anthropic-beta",
+            "x-stainless-lang",
+            "x-stainless-package-version",
+            "x-stainless-runtime",
+            "x-stainless-runtime-version",
+            "x-stainless-os",
+            "x-stainless-arch"
+    );
 
     /**
      * Handle Anthropic Messages API requests
@@ -65,6 +89,7 @@ public class AnthropicProxyController {
         rootSpan.addAttribute("model", request.getModel());
         rootSpan.addAttribute("stream", request.getStream() != null ? request.getStream() : false);
         rootSpan.addAttribute("user.id", userId);
+        addSafeHeaderAttributes(rootSpan, httpRequest);
 
         log.info("Received request from user: {}, model: {}, stream: {}, traceId: {}", 
                 userId, request.getModel(), request.getStream(), traceId);
@@ -88,6 +113,13 @@ public class AnthropicProxyController {
         // Start conversation and get conversationId for Agent Trace tracking
         String conversationId = traceService.startConversation(userId, request, headers);
         rootSpan.addAttribute("conversation.id", conversationId);
+
+        // Correlation: tool_use_ids consumed by this request (tool_result.tool_use_id)
+        List<String> consumedToolUseIds = extractConsumedToolUseIds(request);
+        if (!consumedToolUseIds.isEmpty()) {
+            rootSpan.addAttribute("tool.use_ids.consumed_count", consumedToolUseIds.size());
+            rootSpan.addAttribute("tool.use_ids.consumed", String.join(",", consumedToolUseIds));
+        }
 
         // Handle streaming vs non-streaming
         if (Boolean.TRUE.equals(request.getStream())) {
@@ -118,6 +150,25 @@ public class AnthropicProxyController {
             if (response != null && response.getUsage() != null) {
                 apiSpan.addAttribute("tokens.input", response.getUsage().getInputTokens());
                 apiSpan.addAttribute("tokens.output", response.getUsage().getOutputTokens());
+            }
+
+            // Attach safe tool call summaries for UI/debugging (no args/content)
+            String toolCallsJson = traceService.getToolCallsSummaryJson(conversationId, 50, 4000);
+            if (toolCallsJson != null && !toolCallsJson.isBlank()) {
+                apiSpan.addAttribute("tool.calls.count", traceService.getToolCallIds(conversationId).size());
+                apiSpan.addAttribute("tool.calls.summary", toolCallsJson);
+                rootSpan.addAttribute("tool.calls.count", traceService.getToolCallIds(conversationId).size());
+                rootSpan.addAttribute("tool.calls.summary", toolCallsJson);
+            }
+
+            // Correlation: tool_use ids emitted by the model in this response (non-streaming)
+            List<String> emittedToolUseIds = extractEmittedToolUseIds(response);
+            if (!emittedToolUseIds.isEmpty()) {
+                String joined = String.join(",", emittedToolUseIds);
+                apiSpan.addAttribute("tool.use_ids.emitted_count", emittedToolUseIds.size());
+                apiSpan.addAttribute("tool.use_ids.emitted", joined);
+                rootSpan.addAttribute("tool.use_ids.emitted_count", emittedToolUseIds.size());
+                rootSpan.addAttribute("tool.use_ids.emitted", joined);
             }
 
             apiSpan.setStatus(SpanStatus.ok());
@@ -195,6 +246,26 @@ public class AnthropicProxyController {
                             rootSpan.setStatus(SpanStatus.error("Streaming terminated: " + signalType));
                         }
 
+                        // Correlation: tool_use ids emitted during streaming (recorded by TraceService)
+                        List<String> emitted = traceService.getToolCallIds(conversationId);
+                        if (!emitted.isEmpty()) {
+                            String joined = String.join(",", emitted);
+                            streamSpan.addAttribute("tool.use_ids.emitted_count", emitted.size());
+                            streamSpan.addAttribute("tool.use_ids.emitted", joined);
+                            rootSpan.addAttribute("tool.use_ids.emitted_count", emitted.size());
+                            rootSpan.addAttribute("tool.use_ids.emitted", joined);
+                        }
+
+                        // Attach safe tool call summaries for UI/debugging (no args/content)
+                        String toolCallsJson = traceService.getToolCallsSummaryJson(conversationId, 50, 4000);
+                        if (toolCallsJson != null && !toolCallsJson.isBlank()) {
+                            int callCount = traceService.getToolCallIds(conversationId).size();
+                            streamSpan.addAttribute("tool.calls.count", callCount);
+                            streamSpan.addAttribute("tool.calls.summary", toolCallsJson);
+                            rootSpan.addAttribute("tool.calls.count", callCount);
+                            rootSpan.addAttribute("tool.calls.summary", toolCallsJson);
+                        }
+
                         // Always end spans and complete/export the OTEL trace to avoid leaks.
                         otelTraceService.endSpan(streamSpan, streamSpan.getStatus());
                         otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
@@ -209,6 +280,100 @@ public class AnthropicProxyController {
         } catch (Exception e) {
             log.error("Error handling streaming request: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * Extract tool_use ids consumed by this request.
+     * We look for content blocks with type "tool_result" and take "tool_use_id".
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> extractConsumedToolUseIds(AnthropicRequest request) {
+        if (request == null || request.getMessages() == null) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>();
+        for (var msg : request.getMessages()) {
+            if (msg == null) continue;
+            Object content = msg.getContent();
+            if (!(content instanceof List<?> list)) continue;
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> map)) continue;
+                Object type = map.get("type");
+                if (!Objects.equals(String.valueOf(type), "tool_result")) continue;
+                Object toolUseId = map.get("tool_use_id");
+                if (toolUseId != null) {
+                    String id = String.valueOf(toolUseId).trim();
+                    if (!id.isEmpty()) ids.add(id);
+                }
+            }
+        }
+        return ids.stream().distinct().toList();
+    }
+
+    /**
+     * Extract tool_use ids emitted by the model in a non-streaming response.
+     */
+    private List<String> extractEmittedToolUseIds(AnthropicResponse response) {
+        if (response == null || response.getContent() == null) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>();
+        for (var block : response.getContent()) {
+            if (block == null) continue;
+            if (!"tool_use".equals(block.getType())) continue;
+            if (block.getId() != null && !block.getId().isBlank()) {
+                ids.add(block.getId().trim());
+            }
+        }
+        return ids.stream().distinct().toList();
+    }
+
+    /**
+     * Add a safe, whitelisted set of request headers to the root span.
+     * This helps investigate whether the client provides stable correlation IDs
+     * (session/turn/request) that can be used to link multiple /messages calls.
+     */
+    private void addSafeHeaderAttributes(Span rootSpan, HttpServletRequest httpRequest) {
+        if (rootSpan == null || httpRequest == null) {
+            return;
+        }
+
+        int present = 0;
+        for (String key : CORRELATION_HEADER_KEYS) {
+            String value = httpRequest.getHeader(key);
+            if (value == null || value.isBlank()) {
+                continue;
+            }
+            present++;
+            // Avoid huge values
+            String v = value.length() > 200 ? value.substring(0, 200) + "..." : value;
+            rootSpan.addAttribute("http.header." + key, v);
+        }
+        rootSpan.addAttribute("http.header.correlation_present_count", present);
+
+        // Promote a best-effort request id if available (useful for debugging)
+        String requestId = firstHeader(httpRequest, "x-request-id", "x-correlation-id");
+        if (requestId != null) {
+            rootSpan.addAttribute("request.id", requestId);
+        }
+        String sessionId = firstHeader(httpRequest, "x-session-id", "x-conversation-id", "x-turn-id");
+        if (sessionId != null) {
+            rootSpan.addAttribute("client.session_or_turn_id", sessionId);
+        }
+        String traceparent = httpRequest.getHeader("traceparent");
+        if (traceparent != null && !traceparent.isBlank()) {
+            rootSpan.addAttribute("client.traceparent", traceparent);
+        }
+    }
+
+    private String firstHeader(HttpServletRequest req, String... keys) {
+        for (String k : keys) {
+            String v = req.getHeader(k);
+            if (v != null && !v.isBlank()) {
+                return v;
+            }
+        }
+        return null;
     }
 
 

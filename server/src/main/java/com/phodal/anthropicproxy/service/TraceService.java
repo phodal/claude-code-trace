@@ -156,6 +156,14 @@ public class TraceService {
      */
     public void recordFileEdit(String conversationId, String filePath, int startLine, int endLine,
                                int linesAdded, int linesRemoved, String toolName, String argsPreview) {
+        recordFileEdit(conversationId, null, filePath, startLine, endLine, linesAdded, linesRemoved, toolName, argsPreview);
+    }
+
+    /**
+     * Record a file edit from a tool call with an optional stable tool call ID (tool_use id).
+     */
+    public void recordFileEdit(String conversationId, String toolCallId, String filePath, int startLine, int endLine,
+                               int linesAdded, int linesRemoved, String toolName, String argsPreview) {
         ConversationContext context = activeConversations.get(conversationId);
         if (context == null) {
             log.warn("No active conversation for ID: {}", conversationId);
@@ -180,6 +188,7 @@ public class TraceService {
 
         // Record tool call
         context.addToolCall(ToolCallRecord.builder()
+                .toolCallId(toolCallId)
                 .toolName(toolName)
                 .filePath(filePath)
                 .startLine(startLine)
@@ -206,6 +215,14 @@ public class TraceService {
      * Record a tool call (not necessarily a file edit).
      */
     public void recordToolCall(String conversationId, String toolName, String args) {
+        recordToolCall(conversationId, null, toolName, args);
+    }
+
+    /**
+     * Record a tool call with a stable tool call ID (tool_use id).
+     * The tool call ID is useful for linking tool_use -> tool_result across requests.
+     */
+    public void recordToolCall(String conversationId, String toolCallId, String toolName, String args) {
         ConversationContext context = activeConversations.get(conversationId);
         if (context == null) {
             log.warn("No active conversation for ID: {}", conversationId);
@@ -219,7 +236,7 @@ public class TraceService {
             // Extract file edit info from args
             LinesModifiedInfo linesInfo = extractLinesModifiedFromArgs(args);
             if (linesInfo.filePath != null) {
-                recordFileEdit(conversationId, linesInfo.filePath,
+                recordFileEdit(conversationId, toolCallId, linesInfo.filePath,
                         linesInfo.startLine, linesInfo.endLine,
                         linesInfo.linesAdded, linesInfo.linesRemoved,
                         toolName, createArgsPreview(args));
@@ -229,6 +246,7 @@ public class TraceService {
 
         // Non-edit tool call
         context.addToolCall(ToolCallRecord.builder()
+                .toolCallId(toolCallId)
                 .toolName(toolName)
                 .argsPreview(createArgsPreview(args))
                 .timestamp(Instant.now())
@@ -278,8 +296,76 @@ public class TraceService {
 
         if (toolCalls != null) {
             for (OpenAISdkService.ToolCallInfo toolCall : toolCalls) {
-                recordToolCall(conversationId, toolCall.name(), toolCall.arguments());
+                recordToolCall(conversationId, toolCall.id(), toolCall.name(), toolCall.arguments());
             }
+        }
+    }
+
+    /**
+     * Get recorded tool call IDs (tool_use ids) for a conversation.
+     * This can be used to attach correlation IDs to OTEL spans.
+     */
+    public List<String> getToolCallIds(String conversationId) {
+        ConversationContext context = activeConversations.get(conversationId);
+        if (context == null) {
+            return List.of();
+        }
+        synchronized (context.toolCalls) {
+            return context.toolCalls.stream()
+                    .map(ToolCallRecord::getToolCallId)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
+        }
+    }
+
+    /**
+     * Get a safe tool call summary JSON string for attaching to OTEL spans.
+     * This intentionally omits arguments/content to avoid leaking sensitive data.
+     *
+     * @param conversationId conversation id
+     * @param maxCalls max calls to include
+     * @param maxJsonLength max json length (will be truncated)
+     * @return JSON string or null if none
+     */
+    public String getToolCallsSummaryJson(String conversationId, int maxCalls, int maxJsonLength) {
+        ConversationContext context = activeConversations.get(conversationId);
+        if (context == null) {
+            return null;
+        }
+
+        List<Map<String, Object>> summaries;
+        synchronized (context.toolCalls) {
+            summaries = context.toolCalls.stream()
+                    .limit(Math.max(0, maxCalls))
+                    .map(tc -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        if (tc.toolCallId != null) m.put("id", tc.toolCallId);
+                        if (tc.toolName != null) m.put("name", tc.toolName);
+                        if (tc.filePath != null) m.put("filePath", tc.filePath);
+                        if (tc.startLine > 0) m.put("startLine", tc.startLine);
+                        if (tc.endLine > 0) m.put("endLine", tc.endLine);
+                        if (tc.linesAdded > 0) m.put("linesAdded", tc.linesAdded);
+                        if (tc.linesRemoved > 0) m.put("linesRemoved", tc.linesRemoved);
+                        if (tc.timestamp != null) m.put("timestamp", tc.timestamp.toString());
+                        return m;
+                    })
+                    .toList();
+        }
+
+        if (summaries.isEmpty()) {
+            return null;
+        }
+
+        try {
+            String json = objectMapper.writeValueAsString(summaries);
+            if (maxJsonLength > 0 && json.length() > maxJsonLength) {
+                return json.substring(0, maxJsonLength) + "...";
+            }
+            return json;
+        } catch (Exception e) {
+            log.debug("Failed to serialize tool call summaries: {}", e.getMessage());
+            return null;
         }
     }
 
@@ -659,6 +745,7 @@ public class TraceService {
     @Data
     @Builder
     private static class ToolCallRecord {
+        private String toolCallId;
         private String toolName;
         private String filePath;
         private int startLine;
