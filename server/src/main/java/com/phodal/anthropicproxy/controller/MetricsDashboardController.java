@@ -251,24 +251,186 @@ public class MetricsDashboardController {
     }
 
     /**
-     * Backwards compatibility - returns traces as "turns"
+     * JSON API for recent turns (all conversations, even without file edits)
+     * This is different from /api/traces which only returns conversations with file edits
      */
     @GetMapping("/api/turns")
     @ResponseBody
     public List<Map<String, Object>> getRecentTurns() {
+        // Get turn summaries from TraceService (includes all conversations)
+        List<Map<String, Object>> turns = new ArrayList<>(traceService.getRecentTurns());
+        
+        // Convert to UI-friendly format with proper tool call counts
+        return turns.stream()
+                .map(this::turnSummaryToTurnMap)
+                .sorted((a, b) -> {
+                    String timeA = (String) a.get("timestamp");
+                    String timeB = (String) b.get("timestamp");
+                    return timeB.compareTo(timeA); // Most recent first
+                })
+                .collect(Collectors.toList());
+    }
+    
+    private Map<String, Object> turnSummaryToTurnMap(Map<String, Object> summary) {
+        Map<String, Object> map = new HashMap<>(summary);
+        
+        // Calculate tool call counts
+        long totalToolCalls = toLong(summary.get("toolCalls"));
+        long editToolCalls = toLong(summary.get("editToolCalls"));
+        long nonEditToolCalls = Math.max(0, totalToolCalls - editToolCalls);
+        
+        map.put("toolCallCount", nonEditToolCalls);
+        map.put("toolCallCountTotal", totalToolCalls);
+        map.put("editToolCallCount", editToolCalls);
+        
+        // Get tool calls details
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> toolCallsDetails = (List<Map<String, Object>>) summary.get("toolCallsDetails");
+        map.put("toolCalls", toolCallsDetails != null ? toolCallsDetails : List.of());
+        
+        return map;
+    }
+    
+    private long toLong(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Number n) return n.longValue();
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Backwards compatibility - returns traces as "turns"
+     * DEPRECATED: Use /api/turns instead which includes all conversations
+     */
+    @Deprecated
+    @GetMapping("/api/turns-old")
+    @ResponseBody
+    public List<Map<String, Object>> getRecentTurnsOld() {
         return traceService.getRecentTraces(50).stream()
                 .map(this::traceRecordToTurnMap)
                 .collect(Collectors.toList());
     }
 
     /**
-     * Backwards compatibility - returns empty sessions
+     * Backwards compatibility - returns a specific "turn" detail.
+     *
+     * <p>UI uses this to fetch a full tooltip message by turnId (conversation_id).</p>
+     */
+    @GetMapping("/api/turns/{turnId}")
+    @ResponseBody
+    public Map<String, Object> getTurnDetail(@PathVariable String turnId) {
+        TraceRecord trace = null;
+
+        // 1) If client passes a trace UUID, resolve directly.
+        try {
+            UUID id = UUID.fromString(turnId);
+            trace = traceService.findTraceById(id).orElse(null);
+        } catch (IllegalArgumentException ignored) {
+            // ignore
+        }
+
+        // 2) Otherwise treat as conversation_id (e.g. conv-key:sk-...)
+        if (trace == null) {
+            trace = traceService.getRecentTraces(200).stream()
+                    .filter(t -> t.metadata() != null)
+                    .filter(t -> Objects.equals(String.valueOf(t.metadata().get("conversation_id")), turnId))
+                    .max(Comparator.comparing(TraceRecord::timestamp))
+                    .orElse(null);
+        }
+
+        if (trace == null) {
+            return Map.of(
+                    "turnId", turnId,
+                    "error", "Turn not found"
+            );
+        }
+
+        String lastUserMessage = "";
+        if (trace.metadata() != null && trace.metadata().get("last_user_message") != null) {
+            lastUserMessage = String.valueOf(trace.metadata().get("last_user_message"));
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("turnId", turnId);
+        resp.put("traceId", trace.id().toString());
+        resp.put("timestamp", trace.timestamp().toString());
+        resp.put("userId", trace.metadata() != null ? trace.metadata().get("user_id") : null);
+        resp.put("conversationId", trace.metadata() != null ? trace.metadata().get("conversation_id") : null);
+        resp.put("lastUserMessage", lastUserMessage);
+        return resp;
+    }
+
+    /**
+     * Get session-like aggregated data by grouping traces by conversation_id.
+     * This provides a session view for the UI.
      */
     @GetMapping("/api/sessions")
     @ResponseBody
     public List<Map<String, Object>> getRecentSessions() {
-        // Sessions are now implicit in traces
-        return Collections.emptyList();
+        List<TraceRecord> traces = traceService.getRecentTraces(200);
+        
+        // Group traces by conversation_id to create "sessions"
+        Map<String, List<TraceRecord>> sessionMap = new LinkedHashMap<>();
+        for (TraceRecord trace : traces) {
+            if (trace.metadata() == null) continue;
+            String convId = (String) trace.metadata().get("conversation_id");
+            if (convId == null) continue;
+            sessionMap.computeIfAbsent(convId, k -> new ArrayList<>()).add(trace);
+        }
+        
+        // Build session summaries
+        List<Map<String, Object>> sessions = new ArrayList<>();
+        for (Map.Entry<String, List<TraceRecord>> entry : sessionMap.entrySet()) {
+            String sessionId = entry.getKey();
+            List<TraceRecord> sessionTraces = entry.getValue();
+            
+            if (sessionTraces.isEmpty()) continue;
+            
+            // Sort by timestamp
+            sessionTraces.sort(Comparator.comparing(TraceRecord::timestamp));
+            
+            TraceRecord first = sessionTraces.get(0);
+            TraceRecord last = sessionTraces.get(sessionTraces.size() - 1);
+            
+            // Aggregate metrics
+            int totalToolCalls = 0;
+            int totalLinesModified = 0;
+            int errorCount = 0;
+            String userId = first.metadata() != null ? (String) first.metadata().get("user_id") : "unknown";
+            
+            for (TraceRecord t : sessionTraces) {
+                if (t.metadata() != null) {
+                    Object tc = t.metadata().get("tool_calls");
+                    if (tc instanceof Number) totalToolCalls += ((Number) tc).intValue();
+                }
+                totalLinesModified += t.totalLineCount();
+            }
+            
+            Map<String, Object> session = new HashMap<>();
+            session.put("sessionId", sessionId);
+            session.put("userId", userId);
+            session.put("startTime", first.timestamp().toString());
+            session.put("lastActivityTime", last.timestamp().toString());
+            session.put("turnCount", sessionTraces.size());
+            session.put("totalToolCalls", totalToolCalls);
+            session.put("avgToolCallsPerTurn", sessionTraces.size() > 0 ? (double) totalToolCalls / sessionTraces.size() : 0.0);
+            session.put("totalLinesModified", totalLinesModified);
+            session.put("errorCount", errorCount);
+            
+            sessions.add(session);
+        }
+        
+        // Sort by last activity (most recent first)
+        sessions.sort((a, b) -> {
+            String timeA = (String) a.get("lastActivityTime");
+            String timeB = (String) b.get("lastActivityTime");
+            return timeB.compareTo(timeA);
+        });
+        
+        return sessions;
     }
 
     // Helper methods
@@ -439,37 +601,84 @@ public class MetricsDashboardController {
         map.put("timestamp", trace.timestamp().toString());
         map.put("userId", trace.metadata() != null ? trace.metadata().get("user_id") : "unknown");
         map.put("model", trace.getModelIds().isEmpty() ? "unknown" : trace.getModelIds().iterator().next());
-        map.put("toolCallCount", trace.metadata() != null ? trace.metadata().get("tool_calls") : 0);
+        // Tool calls:
+        // - tool_calls: total tool calls in the conversation (including edits)
+        // - edit_tool_calls: tool calls that touched a file (edit tools)
+        // UI should distinguish non-edit vs edit to avoid double-counting in the table.
+        long totalToolCalls = 0;
+        if (trace.metadata() != null && trace.metadata().get("tool_calls") instanceof Number n) {
+            totalToolCalls = n.longValue();
+        } else if (trace.metadata() != null && trace.metadata().get("tool_calls") != null) {
+            try {
+                totalToolCalls = Long.parseLong(String.valueOf(trace.metadata().get("tool_calls")));
+            } catch (Exception ignored) { }
+        }
+
         // Prefer true edit tool call count (tool calls that touched a file), fallback to file count for older traces.
-        Object editToolCalls = trace.metadata() != null ? trace.metadata().get("edit_tool_calls") : null;
-        map.put("editToolCallCount", editToolCalls != null ? editToolCalls : trace.fileCount());
+        long editToolCalls = -1;
+        if (trace.metadata() != null && trace.metadata().get("edit_tool_calls") instanceof Number n) {
+            editToolCalls = n.longValue();
+        } else if (trace.metadata() != null && trace.metadata().get("edit_tool_calls") != null) {
+            try {
+                editToolCalls = Long.parseLong(String.valueOf(trace.metadata().get("edit_tool_calls")));
+            } catch (Exception ignored) { }
+        }
+        if (editToolCalls < 0) {
+            editToolCalls = trace.fileCount();
+        }
+
+        long nonEditToolCalls = Math.max(0, totalToolCalls - editToolCalls);
+        map.put("toolCallCount", nonEditToolCalls);
+        map.put("toolCallCountTotal", totalToolCalls);
+        map.put("editToolCallCount", editToolCalls);
         map.put("linesAdded", trace.metadata() != null ? trace.metadata().get("lines_added") : 0);
         map.put("linesRemoved", trace.metadata() != null ? trace.metadata().get("lines_removed") : 0);
         map.put("linesModified", trace.totalLineCount());
         map.put("promptTokens", trace.metadata() != null ? trace.metadata().get("prompt_tokens") : 0);
         map.put("completionTokens", trace.metadata() != null ? trace.metadata().get("completion_tokens") : 0);
         map.put("latencyMs", trace.metadata() != null ? trace.metadata().get("latency_ms") : 0);
-        map.put("lastUserMessagePreview", "Trace: " + trace.files().stream()
-                .map(f -> f.path())
-                .limit(3)
-                .collect(Collectors.joining(", ")));
+        String lastUserMessage = trace.metadata() != null ? String.valueOf(trace.metadata().get("last_user_message")) : "";
+        String preview = (lastUserMessage != null && !lastUserMessage.isBlank())
+                ? lastUserMessage
+                : ("Trace: " + trace.files().stream()
+                    .map(f -> f.path())
+                    .limit(3)
+                    .collect(Collectors.joining(", ")));
+        map.put("lastUserMessagePreview", preview);
         
-        // Tool calls as file edits
-        List<Map<String, Object>> toolCalls = trace.files().stream()
-                .map(file -> {
-                    Map<String, Object> tc = new HashMap<>();
-                    tc.put("name", "FileEdit");
-                    tc.put("filePath", file.path());
-                    tc.put("linesAdded", file.totalLineCount());
-                    tc.put("linesRemoved", 0);
-                    tc.put("status", "ok");
-                    tc.put("argsPreview", file.conversations().stream()
-                            .flatMap(c -> c.ranges().stream())
-                            .map(r -> "L" + r.startLine() + "-" + r.endLine())
-                            .collect(Collectors.joining(", ")));
-                    return tc;
-                })
-                .collect(Collectors.toList());
+        // Tool calls: try to parse from metadata first (contains all tool calls),
+        // fallback to constructing from file edits for older traces
+        List<Map<String, Object>> toolCalls = new ArrayList<>();
+        
+        // Try to get tool calls details from metadata if available
+        if (trace.metadata() != null && trace.metadata().get("tool_calls_details") != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> parsed = (List<Map<String, Object>>) trace.metadata().get("tool_calls_details");
+                toolCalls.addAll(parsed);
+            } catch (Exception ignored) {
+                // Failed to parse tool_calls_details, will fallback to file edits
+            }
+        }
+        
+        // Fallback: construct from file edits for backwards compatibility
+        if (toolCalls.isEmpty() && !trace.files().isEmpty()) {
+            toolCalls = trace.files().stream()
+                    .map(file -> {
+                        Map<String, Object> tc = new HashMap<>();
+                        tc.put("name", "FileEdit");
+                        tc.put("filePath", file.path());
+                        tc.put("linesAdded", file.totalLineCount());
+                        tc.put("linesRemoved", 0);
+                        tc.put("status", "ok");
+                        tc.put("argsPreview", file.conversations().stream()
+                                .flatMap(c -> c.ranges().stream())
+                                .map(r -> "L" + r.startLine() + "-" + r.endLine())
+                                .collect(Collectors.joining(", ")));
+                        return tc;
+                    })
+                    .collect(Collectors.toList());
+        }
         
         map.put("toolCalls", toolCalls);
         

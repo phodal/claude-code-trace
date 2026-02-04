@@ -54,6 +54,12 @@ public class TraceService {
     @Getter
     private final List<TraceRecord> recentTraces = Collections.synchronizedList(new LinkedList<>());
     private static final int MAX_RECENT_TRACES = 200;
+    
+    // In-memory cache for recent "turns" (all conversations, even without file edits)
+    // This allows the UI to show all requests, not just those with file edits
+    @Getter
+    private final List<Map<String, Object>> recentTurns = Collections.synchronizedList(new LinkedList<>());
+    private static final int MAX_RECENT_TURNS = 200;
 
     // User metrics aggregation
     @Getter
@@ -73,6 +79,7 @@ public class TraceService {
     );
 
     private static final int ARGS_PREVIEW_LENGTH = 150;
+    private static final int LAST_USER_MESSAGE_MAX_LENGTH = 4000;
 
     public TraceService(
             ObjectMapper objectMapper,
@@ -472,13 +479,68 @@ public class TraceService {
             return null;
         }
 
-        // Only create trace if there are file edits
-        if (context.fileEdits.isEmpty()) {
-            log.debug("Conversation {} ended without file edits, no trace created", conversationId);
+        // Calculate tool call metrics first
+        int totalToolCalls;
+        long editToolCalls;
+        synchronized (context.toolCalls) {
+            totalToolCalls = context.toolCalls.size();
+            // Count edit tool calls as those that recorded a file path (i.e., file edits)
+            editToolCalls = context.toolCalls.stream()
+                    .filter(tc -> tc.filePath != null && !tc.filePath.isBlank())
+                    .count();
+        }
+        
+        // Store tool calls details for UI (with args preview for debugging)
+        List<Map<String, Object>> toolCallsDetails = new ArrayList<>();
+        synchronized (context.toolCalls) {
+            for (ToolCallRecord tc : context.toolCalls) {
+                Map<String, Object> tcMap = new HashMap<>();
+                if (tc.toolCallId != null) tcMap.put("id", tc.toolCallId);
+                if (tc.toolName != null) tcMap.put("name", tc.toolName);
+                if (tc.filePath != null && !tc.filePath.isBlank()) tcMap.put("filePath", tc.filePath);
+                if (tc.startLine > 0) tcMap.put("startLine", tc.startLine);
+                if (tc.endLine > 0) tcMap.put("endLine", tc.endLine);
+                if (tc.linesAdded > 0) tcMap.put("linesAdded", tc.linesAdded);
+                if (tc.linesRemoved > 0) tcMap.put("linesRemoved", tc.linesRemoved);
+                if (tc.argsPreview != null && !tc.argsPreview.isBlank()) tcMap.put("argsPreview", tc.argsPreview);
+                if (tc.timestamp != null) tcMap.put("timestamp", tc.timestamp.toString());
+                tcMap.put("status", "ok"); // Default to ok for now
+                toolCallsDetails.add(tcMap);
+            }
+        }
+
+        // ALWAYS create a turn summary (even if no file edits)
+        // This ensures UI shows all requests, not just those with file edits
+        Map<String, Object> turnSummary = new HashMap<>();
+        turnSummary.put("turnId", conversationId);
+        turnSummary.put("conversationId", conversationId);
+        turnSummary.put("timestamp", context.startTime.toString());
+        turnSummary.put("userId", context.userId);
+        turnSummary.put("model", context.model);
+        turnSummary.put("normalizedModelId", context.normalizedModelId);
+        turnSummary.put("lastUserMessage", truncate(context.lastUserMessage, LAST_USER_MESSAGE_MAX_LENGTH));
+        turnSummary.put("lastUserMessagePreview", truncate(context.lastUserMessage, 100));
+        turnSummary.put("latencyMs", context.latencyMs);
+        turnSummary.put("promptTokens", context.promptTokens);
+        turnSummary.put("completionTokens", context.completionTokens);
+        turnSummary.put("toolCalls", totalToolCalls);
+        turnSummary.put("editToolCalls", editToolCalls);
+        turnSummary.put("linesAdded", context.getTotalLinesAdded());
+        turnSummary.put("linesRemoved", context.getTotalLinesRemoved());
+        turnSummary.put("linesModified", context.getTotalLinesAdded() + context.getTotalLinesRemoved());
+        turnSummary.put("toolCallsDetails", toolCallsDetails);
+        
+        addRecentTurn(turnSummary);
+
+        // Create trace ONLY if there are file edits (Agent Trace spec requires at least one file)
+        boolean hasFileEdits = !context.fileEdits.isEmpty();
+        
+        if (!hasFileEdits) {
+            log.debug("Conversation {} ended without file edits, turn summary created but no trace", conversationId);
             return null;
         }
 
-        // Build TraceRecord
+        // Build TraceRecord (only when there are file edits)
         TraceRecord.Builder builder = TraceRecord.builder()
                 .timestamp(context.startTime)
                 .tool("anthropic-proxy", "1.0.0");
@@ -505,22 +567,19 @@ public class TraceService {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("conversation_id", conversationId);
         metadata.put("user_id", context.userId);
+        metadata.put("last_user_message", truncate(context.lastUserMessage, LAST_USER_MESSAGE_MAX_LENGTH));
         metadata.put("latency_ms", context.latencyMs);
         metadata.put("prompt_tokens", context.promptTokens);
         metadata.put("completion_tokens", context.completionTokens);
-        int totalToolCalls;
-        long editToolCalls;
-        synchronized (context.toolCalls) {
-            totalToolCalls = context.toolCalls.size();
-            // Count edit tool calls as those that recorded a file path (i.e., file edits)
-            editToolCalls = context.toolCalls.stream()
-                    .filter(tc -> tc.filePath != null && !tc.filePath.isBlank())
-                    .count();
-        }
         metadata.put("tool_calls", totalToolCalls);
         metadata.put("edit_tool_calls", editToolCalls);
         metadata.put("lines_added", context.getTotalLinesAdded());
         metadata.put("lines_removed", context.getTotalLinesRemoved());
+        
+        if (!toolCallsDetails.isEmpty()) {
+            metadata.put("tool_calls_details", toolCallsDetails);
+        }
+        
         builder.metadata(metadata);
 
         TraceRecord record = builder.build();
@@ -536,6 +595,15 @@ public class TraceService {
         }
 
         return record;
+    }
+    
+    private void addRecentTurn(Map<String, Object> turnSummary) {
+        synchronized (recentTurns) {
+            recentTurns.add(turnSummary);
+            while (recentTurns.size() > MAX_RECENT_TURNS) {
+                recentTurns.remove(0);
+            }
+        }
     }
 
     /**
@@ -748,6 +816,13 @@ public class TraceService {
         if (args == null || args.isEmpty()) return "";
         if (args.length() <= ARGS_PREVIEW_LENGTH) return args;
         return args.substring(0, ARGS_PREVIEW_LENGTH) + "...";
+    }
+
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        if (maxLen <= 0) return "";
+        if (s.length() <= maxLen) return s;
+        return s.substring(0, maxLen) + "...";
     }
 
     private String toRelativePath(String absolutePath) {

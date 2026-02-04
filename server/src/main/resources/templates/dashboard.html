@@ -135,7 +135,7 @@
             
             <!-- Turns Tab -->
             <div id="content-turns" class="tab-content">
-                <h2 class="text-xl font-semibold mb-4">Recent Messages (with Tool Calls)</h2>
+                <h2 class="text-xl font-semibold mb-4">Recent Messages (Tool Calls breakdown)</h2>
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200" id="turns-table">
                         <thead class="bg-gray-50">
@@ -144,7 +144,7 @@
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Message Preview</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tool Calls</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tool Calls (Total / non-edit)</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Edits/Lines</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tokens</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Latency</th>
@@ -335,7 +335,15 @@
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${turn.model || '-'}</td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm">
-                        ${turn.toolCallCount > 0 ? `<span class="tool-badge">${turn.toolCallCount} calls</span>` : '<span class="text-gray-400">-</span>'}
+                        ${(() => {
+                            const total = Number(turn.toolCallCountTotal || 0);
+                            const nonEdit = Number(turn.toolCallCount || 0);
+                            const edit = Number(turn.editToolCallCount || 0);
+                            if (total <= 0 && nonEdit <= 0 && edit <= 0) return '<span class="text-gray-400">-</span>';
+                            const totalBadge = total > 0 ? `<span class="tool-badge">${total} total</span>` : '';
+                            const nonEditBadge = nonEdit > 0 ? `<span class="tool-badge ml-2">${nonEdit} non-edit</span>` : `<span class="text-gray-400 ml-2">0 non-edit</span>`;
+                            return `<div class="flex items-center">${totalBadge}${nonEditBadge}</div>`;
+                        })()}
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-sm">
                         ${turn.editToolCallCount > 0 ? `<span class="edit-badge">${turn.editToolCallCount} edits</span> <span class="text-green-600">+${turn.linesAdded || 0}</span> <span class="text-red-600">-${turn.linesRemoved || 0}</span>` : '<span class="text-gray-400">-</span>'}
@@ -353,34 +361,71 @@
         
         function renderToolCalls(toolCalls) {
             if (toolCalls.length === 0) {
-                return '<div class="text-gray-500 text-sm">No tool calls in this message</div>';
+                return '<div class="text-gray-500 text-sm">No tool calls recorded in this message</div>';
             }
             
-            return `
-                <div class="space-y-2">
-                    <div class="font-medium text-sm text-gray-700">Tool Calls:</div>
-                    ${toolCalls.map(tc => `
-                        <div class="bg-white p-3 rounded border border-gray-200">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <span class="font-medium text-sm">${tc.name}</span>
-                                    ${tc.filePath ? `<span class="ml-2 text-xs text-gray-500 font-mono">${truncate(tc.filePath, 40)}</span>` : ''}
+            // Separate edit and non-edit tool calls
+            const editCalls = toolCalls.filter(tc => tc.filePath && tc.filePath.trim() !== '');
+            const nonEditCalls = toolCalls.filter(tc => !tc.filePath || tc.filePath.trim() === '');
+            
+            let html = '<div class="space-y-3">';
+            
+            // Render non-edit tool calls if any
+            if (nonEditCalls.length > 0) {
+                html += `
+                    <div>
+                        <div class="font-medium text-sm text-gray-700 mb-2">Non-Edit Tool Calls (${nonEditCalls.length}):</div>
+                        <div class="space-y-2">
+                            ${nonEditCalls.map(tc => `
+                                <div class="bg-blue-50 p-3 rounded border border-blue-200">
+                                    <div class="flex items-center justify-between">
+                                        <div>
+                                            <span class="font-medium text-sm">${tc.name || 'unknown'}</span>
+                                            ${tc.id ? `<span class="ml-2 text-xs text-gray-500 font-mono">${truncate(tc.id, 20)}</span>` : ''}
+                                        </div>
+                                        <span class="text-xs px-2 py-0.5 rounded ${tc.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${tc.status || 'ok'}</span>
+                                    </div>
+                                    ${tc.argsPreview ? `<div class="mt-1 text-xs text-gray-600 font-mono bg-white p-2 rounded overflow-x-auto">${escapeHtml(tc.argsPreview)}</div>` : ''}
                                 </div>
-                                <div class="flex items-center space-x-2">
-                                    ${(tc.linesAdded > 0 || tc.linesRemoved > 0) ? `
-                                        <span class="text-xs">
-                                            <span class="text-green-600 font-medium">+${tc.linesAdded || 0}</span>
-                                            <span class="text-red-600 font-medium">-${tc.linesRemoved || 0}</span>
-                                        </span>
-                                    ` : ''}
-                                    <span class="text-xs px-2 py-0.5 rounded ${tc.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${tc.status}</span>
-                                </div>
-                            </div>
-                            ${tc.argsPreview ? `<div class="mt-1 text-xs text-gray-600 font-mono bg-gray-50 p-2 rounded overflow-x-auto">${escapeHtml(tc.argsPreview)}</div>` : ''}
+                            `).join('')}
                         </div>
-                    `).join('')}
-                </div>
-            `;
+                    </div>
+                `;
+            }
+            
+            // Render edit tool calls if any
+            if (editCalls.length > 0) {
+                html += `
+                    <div>
+                        <div class="font-medium text-sm text-gray-700 mb-2">Edit Tool Calls (${editCalls.length}):</div>
+                        <div class="space-y-2">
+                            ${editCalls.map(tc => `
+                                <div class="bg-green-50 p-3 rounded border border-green-200">
+                                    <div class="flex items-center justify-between">
+                                        <div>
+                                            <span class="font-medium text-sm">${tc.name || 'FileEdit'}</span>
+                                            ${tc.filePath ? `<span class="ml-2 text-xs text-gray-500 font-mono">${truncate(tc.filePath, 40)}</span>` : ''}
+                                        </div>
+                                        <div class="flex items-center space-x-2">
+                                            ${(tc.linesAdded > 0 || tc.linesRemoved > 0) ? `
+                                                <span class="text-xs">
+                                                    <span class="text-green-600 font-medium">+${tc.linesAdded || 0}</span>
+                                                    <span class="text-red-600 font-medium">-${tc.linesRemoved || 0}</span>
+                                                </span>
+                                            ` : ''}
+                                            <span class="text-xs px-2 py-0.5 rounded ${tc.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${tc.status || 'ok'}</span>
+                                        </div>
+                                    </div>
+                                    ${tc.argsPreview ? `<div class="mt-1 text-xs text-gray-600 font-mono bg-white p-2 rounded overflow-x-auto">${escapeHtml(tc.argsPreview)}</div>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            html += '</div>';
+            return html;
         }
         
         function toggleTurnDetail(turnId) {
