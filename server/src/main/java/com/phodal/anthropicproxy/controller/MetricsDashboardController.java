@@ -515,10 +515,104 @@ public class MetricsDashboardController {
                     map.put("linesAdded", stats.linesAdded);
                     map.put("linesRemoved", stats.linesRemoved);
                     map.put("isEditTool", stats.linesAdded > 0 || stats.linesRemoved > 0);
+                    map.put("isSkill", "Skill".equalsIgnoreCase(stats.toolName));
                     return map;
                 })
                 .sorted((a, b) -> Long.compare((Long) b.get("calls"), (Long) a.get("calls")))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Get skills statistics - aggregated by individual skill names parsed from tool arguments.
+     * Skills are tool calls with name "Skill" that contain {"skill": "skill-name"} in their arguments.
+     */
+    @GetMapping("/api/skills/statistics")
+    @ResponseBody
+    public List<Map<String, Object>> getSkillsStatistics() {
+        List<Map<String, Object>> allTurns = traceService.getRecentTurns();
+        
+        // Aggregate skill statistics by skill name
+        Map<String, SkillStats> skillStatsMap = new LinkedHashMap<>();
+        
+        for (Map<String, Object> turn : allTurns) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) turn.get("toolCallsDetails");
+            if (toolCalls == null) continue;
+            
+            for (Map<String, Object> tc : toolCalls) {
+                String toolName = (String) tc.get("name");
+                if (!"Skill".equalsIgnoreCase(toolName)) continue;
+                
+                // Extract skill name from args
+                String skillName = extractSkillName(tc);
+                if (skillName == null) skillName = "unknown";
+                
+                SkillStats stats = skillStatsMap.computeIfAbsent(skillName, SkillStats::new);
+                stats.incrementCalls();
+                
+                // Track success
+                String status = (String) tc.get("status");
+                if (status == null || "ok".equals(status)) {
+                    stats.incrementSuccess();
+                }
+                
+                // Track timestamp for last used
+                String timestamp = (String) tc.get("timestamp");
+                if (timestamp != null) {
+                    stats.updateLastUsed(timestamp);
+                }
+            }
+        }
+        
+        // Convert to list and sort by call count (descending)
+        return skillStatsMap.values().stream()
+                .map(stats -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("skillName", stats.skillName);
+                    map.put("calls", stats.calls);
+                    map.put("successRate", stats.calls > 0 ? (stats.successCount * 100.0 / stats.calls) : 100.0);
+                    map.put("lastUsed", stats.lastUsed);
+                    return map;
+                })
+                .sorted((a, b) -> Long.compare((Long) b.get("calls"), (Long) a.get("calls")))
+                .collect(Collectors.toList());
+    }
+    
+    /**
+     * Extract skill name from tool call arguments.
+     * Expects JSON like: {"skill": "generate-crud"}
+     */
+    private String extractSkillName(Map<String, Object> toolCall) {
+        String argsPreview = (String) toolCall.get("argsPreview");
+        if (argsPreview == null || argsPreview.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> args = objectMapper.readValue(argsPreview, Map.class);
+            Object skill = args.get("skill");
+            if (skill != null) {
+                return String.valueOf(skill);
+            }
+        } catch (Exception e) {
+            // Try simple parsing if JSON parsing fails
+            if (argsPreview.contains("\"skill\"")) {
+                int start = argsPreview.indexOf("\"skill\"");
+                int colon = argsPreview.indexOf(":", start);
+                if (colon > 0) {
+                    int quote1 = argsPreview.indexOf("\"", colon);
+                    if (quote1 > 0) {
+                        int quote2 = argsPreview.indexOf("\"", quote1 + 1);
+                        if (quote2 > 0) {
+                            return argsPreview.substring(quote1 + 1, quote2);
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null;
     }
     
     /**
@@ -539,6 +633,28 @@ public class MetricsDashboardController {
         void incrementSuccess() { successCount++; }
         void addLinesAdded(long n) { linesAdded += n; }
         void addLinesRemoved(long n) { linesRemoved += n; }
+    }
+    
+    /**
+     * Helper class for aggregating skill statistics
+     */
+    private static class SkillStats {
+        String skillName;
+        long calls = 0;
+        long successCount = 0;
+        String lastUsed = null;
+        
+        SkillStats(String skillName) {
+            this.skillName = skillName;
+        }
+        
+        void incrementCalls() { calls++; }
+        void incrementSuccess() { successCount++; }
+        void updateLastUsed(String timestamp) {
+            if (lastUsed == null || timestamp.compareTo(lastUsed) > 0) {
+                lastUsed = timestamp;
+            }
+        }
     }
 
     // Helper methods
