@@ -5,6 +5,10 @@ pom.xml.releaseBackup
 pom.xml.versionsBackup
 pom.xml.next
 release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
 
 # IDE
 .idea/
@@ -15,6 +19,9 @@ release.properties
 .classpath
 .settings/
 .vscode/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
@@ -24,12 +31,6 @@ Thumbs.db
 *.log
 logs/
 
-# Agent Trace data (local traces)
-.agent-trace/
-
 # Build
 build/
 out/
-
-# Lombok
-.apt_generated/

@@ -2,8 +2,8 @@ package com.phodal.anthropicproxy.controller;
 
 import com.phodal.anthropicproxy.model.anthropic.AnthropicRequest;
 import com.phodal.anthropicproxy.model.anthropic.AnthropicResponse;
-import com.phodal.anthropicproxy.service.MetricsService;
 import com.phodal.anthropicproxy.service.OpenAISdkService;
+import com.phodal.anthropicproxy.service.TraceService;
 import com.phodal.anthropicproxy.service.UserIdentificationService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -20,6 +20,7 @@ import java.util.Map;
 /**
  * Controller to handle Anthropic API proxy requests
  * Uses official OpenAI Java SDK for API calls
+ * Records traces using Agent Trace specification
  */
 @Slf4j
 @RestController
@@ -28,7 +29,7 @@ import java.util.Map;
 public class AnthropicProxyController {
 
     private final OpenAISdkService sdkService;
-    private final MetricsService metricsService;
+    private final TraceService traceService;
     private final UserIdentificationService userIdentificationService;
 
     /**
@@ -46,8 +47,8 @@ public class AnthropicProxyController {
 
         log.info("Received request from user: {}, model: {}, stream: {}", userId, request.getModel(), request.getStream());
 
-        // Record the request and get turnId
-        String turnId = metricsService.recordRequest(userId, request, headers);
+        // Start conversation and get conversationId for tracing
+        String conversationId = traceService.startConversation(userId, request, headers);
 
         if (apiKey == null || apiKey.isEmpty()) {
             log.error("No API key provided");
@@ -62,10 +63,10 @@ public class AnthropicProxyController {
 
         // Handle streaming vs non-streaming
         if (Boolean.TRUE.equals(request.getStream())) {
-            handleStreamingRequest(request, userId, turnId, apiKey, httpResponse);
+            handleStreamingRequest(request, userId, conversationId, apiKey, httpResponse);
             return null;
         } else {
-            return handleNonStreamingRequest(request, userId, turnId, apiKey);
+            return handleNonStreamingRequest(request, userId, conversationId, apiKey);
         }
     }
 
@@ -73,12 +74,15 @@ public class AnthropicProxyController {
      * Handle non-streaming request
      */
     private ResponseEntity<?> handleNonStreamingRequest(
-            AnthropicRequest request, String userId, String turnId, String apiKey) {
+            AnthropicRequest request, String userId, String conversationId, String apiKey) {
         try {
-            AnthropicResponse response = sdkService.sendRequest(request, userId, turnId, apiKey).block();
+            AnthropicResponse response = sdkService.sendRequest(request, userId, conversationId, apiKey).block();
+            // End conversation to generate trace
+            traceService.endConversation(conversationId);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             log.error("Error handling non-streaming request: {}", e.getMessage(), e);
+            traceService.endConversation(conversationId);
             return ResponseEntity.internalServerError().body(Map.of(
                     "type", "error",
                     "error", Map.of(
@@ -93,7 +97,7 @@ public class AnthropicProxyController {
      * Handle streaming request - writes directly to response
      */
     private void handleStreamingRequest(
-            AnthropicRequest request, String userId, String turnId, String apiKey,
+            AnthropicRequest request, String userId, String conversationId, String apiKey,
             HttpServletResponse httpResponse) throws IOException {
 
         httpResponse.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
@@ -105,7 +109,7 @@ public class AnthropicProxyController {
         PrintWriter writer = httpResponse.getWriter();
 
         try {
-            sdkService.sendStreamingRequest(request, userId, turnId, apiKey)
+            sdkService.sendStreamingRequest(request, userId, conversationId, apiKey)
                     .doOnNext(chunk -> {
                         writer.print(chunk);
                         writer.flush();
