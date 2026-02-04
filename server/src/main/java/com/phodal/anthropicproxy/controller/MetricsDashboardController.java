@@ -364,59 +364,62 @@ public class MetricsDashboardController {
     }
 
     /**
-     * Get session-like aggregated data by grouping traces by conversation_id.
-     * This provides a session view for the UI.
+     * Get session-like aggregated data by grouping turns by user.
+     * A session represents all activity for a given user.
+     * This provides a better session view where one session can contain multiple messages.
      */
     @GetMapping("/api/sessions")
     @ResponseBody
     public List<Map<String, Object>> getRecentSessions() {
-        List<TraceRecord> traces = traceService.getRecentTraces(200);
+        List<Map<String, Object>> turns = traceService.getRecentTurns();
         
-        // Group traces by conversation_id to create "sessions"
-        Map<String, List<TraceRecord>> sessionMap = new LinkedHashMap<>();
-        for (TraceRecord trace : traces) {
-            if (trace.metadata() == null) continue;
-            String convId = (String) trace.metadata().get("conversation_id");
-            if (convId == null) continue;
-            sessionMap.computeIfAbsent(convId, k -> new ArrayList<>()).add(trace);
+        // Group turns by userId to create "sessions"
+        Map<String, List<Map<String, Object>>> sessionMap = new LinkedHashMap<>();
+        for (Map<String, Object> turn : turns) {
+            String userId = (String) turn.get("userId");
+            if (userId == null) userId = "unknown";
+            sessionMap.computeIfAbsent(userId, k -> new ArrayList<>()).add(turn);
         }
         
         // Build session summaries
         List<Map<String, Object>> sessions = new ArrayList<>();
-        for (Map.Entry<String, List<TraceRecord>> entry : sessionMap.entrySet()) {
-            String sessionId = entry.getKey();
-            List<TraceRecord> sessionTraces = entry.getValue();
+        for (Map.Entry<String, List<Map<String, Object>>> entry : sessionMap.entrySet()) {
+            String userId = entry.getKey();
+            List<Map<String, Object>> userTurns = entry.getValue();
             
-            if (sessionTraces.isEmpty()) continue;
+            if (userTurns.isEmpty()) continue;
             
             // Sort by timestamp
-            sessionTraces.sort(Comparator.comparing(TraceRecord::timestamp));
+            userTurns.sort((a, b) -> {
+                String timeA = (String) a.get("timestamp");
+                String timeB = (String) b.get("timestamp");
+                if (timeA == null || timeB == null) return 0;
+                return timeA.compareTo(timeB);
+            });
             
-            TraceRecord first = sessionTraces.get(0);
-            TraceRecord last = sessionTraces.get(sessionTraces.size() - 1);
+            Map<String, Object> first = userTurns.get(0);
+            Map<String, Object> last = userTurns.get(userTurns.size() - 1);
             
             // Aggregate metrics
-            int totalToolCalls = 0;
-            int totalLinesModified = 0;
+            long totalToolCalls = 0;
+            long totalLinesModified = 0;
             int errorCount = 0;
-            String userId = first.metadata() != null ? (String) first.metadata().get("user_id") : "unknown";
             
-            for (TraceRecord t : sessionTraces) {
-                if (t.metadata() != null) {
-                    Object tc = t.metadata().get("tool_calls");
-                    if (tc instanceof Number) totalToolCalls += ((Number) tc).intValue();
-                }
-                totalLinesModified += t.totalLineCount();
+            for (Map<String, Object> turn : userTurns) {
+                Object tc = turn.get("toolCalls");
+                if (tc instanceof Number) totalToolCalls += ((Number) tc).longValue();
+                Object lm = turn.get("linesModified");
+                if (lm instanceof Number) totalLinesModified += ((Number) lm).longValue();
             }
             
             Map<String, Object> session = new HashMap<>();
-            session.put("sessionId", sessionId);
+            session.put("sessionId", userId);  // Use userId as sessionId
             session.put("userId", userId);
-            session.put("startTime", first.timestamp().toString());
-            session.put("lastActivityTime", last.timestamp().toString());
-            session.put("turnCount", sessionTraces.size());
+            session.put("startTime", first.get("timestamp"));
+            session.put("lastActivityTime", last.get("timestamp"));
+            session.put("turnCount", userTurns.size());
             session.put("totalToolCalls", totalToolCalls);
-            session.put("avgToolCallsPerTurn", sessionTraces.size() > 0 ? (double) totalToolCalls / sessionTraces.size() : 0.0);
+            session.put("avgToolCallsPerTurn", userTurns.size() > 0 ? (double) totalToolCalls / userTurns.size() : 0.0);
             session.put("totalLinesModified", totalLinesModified);
             session.put("errorCount", errorCount);
             
@@ -427,10 +430,37 @@ public class MetricsDashboardController {
         sessions.sort((a, b) -> {
             String timeA = (String) a.get("lastActivityTime");
             String timeB = (String) b.get("lastActivityTime");
+            if (timeA == null || timeB == null) return 0;
             return timeB.compareTo(timeA);
         });
         
         return sessions;
+    }
+
+    /**
+     * Get all turns for a specific session (user).
+     * This allows viewing all messages in a session.
+     */
+    @GetMapping("/api/sessions/{sessionId}/turns")
+    @ResponseBody
+    public List<Map<String, Object>> getSessionTurns(@PathVariable String sessionId) {
+        List<Map<String, Object>> allTurns = traceService.getRecentTurns();
+        
+        // Filter turns by userId (sessionId is userId)
+        List<Map<String, Object>> sessionTurns = allTurns.stream()
+                .filter(turn -> {
+                    String userId = (String) turn.get("userId");
+                    return sessionId.equals(userId);
+                })
+                .sorted((a, b) -> {
+                    String timeA = (String) a.get("timestamp");
+                    String timeB = (String) b.get("timestamp");
+                    if (timeA == null || timeB == null) return 0;
+                    return timeA.compareTo(timeB);  // Chronological order
+                })
+                .collect(Collectors.toList());
+        
+        return sessionTurns;
     }
 
     // Helper methods
