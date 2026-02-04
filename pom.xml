@@ -20,7 +20,7 @@
 
     <modules>
         <module>agent-trace-core</module>
-        <module>anthropic-proxy</module>
+        <module>server</module>
     </modules>
 
     <properties>
