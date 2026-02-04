@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Code Metrics Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <style>
         .card {
@@ -128,7 +127,7 @@
                         Users
                     </button>
                     <button onclick="showTab('tools')" id="tab-tools" class="py-2 px-1 tab-inactive font-medium text-sm">
-                        Tool Distribution
+                        Tool Performance
                     </button>
                 </nav>
             </div>
@@ -257,14 +256,26 @@
             
             <!-- Tools Tab -->
             <div id="content-tools" class="tab-content hidden">
-                <h2 class="text-xl font-semibold mb-4">Tool Calls Distribution</h2>
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div>
-                        <canvas id="toolCallsChart" height="400"></canvas>
-                    </div>
-                    <div>
-                        <canvas id="userActivityChart" height="400"></canvas>
-                    </div>
+                <div class="mb-4">
+                    <h2 class="text-xl font-semibold">Tool Performance Matrix</h2>
+                    <p class="text-sm text-gray-500 mt-1">Performance metrics and usage statistics for all tools</p>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200" id="tools-table">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tool Name</th>
+                                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
+                                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Success Rate</th>
+                                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Lines Changed</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200" id="tools-body">
+                            <tr>
+                                <td colspan="4" class="px-6 py-4 text-center text-gray-500">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -288,10 +299,6 @@
     </div>
 
     <script th:inline="javascript">
-        // Server-rendered data
-        const toolCallsData = /*[[${toolCallsByName}]]*/ {};
-        const userMetrics = /*[[${userMetrics}]]*/ [];
-        
         // Tab switching
         function showTab(tabName) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -307,6 +314,7 @@
             if (tabName === 'turns') loadTurns();
             if (tabName === 'otel') loadOtelChains();
             if (tabName === 'sessions') loadSessions();
+            if (tabName === 'tools') loadToolPerformance();
         }
         
         // Load turns data
@@ -718,71 +726,66 @@
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
         
-        // Initialize charts
-        function initCharts() {
-            const toolCallsCtx = document.getElementById('toolCallsChart').getContext('2d');
-            const toolLabels = Object.keys(toolCallsData);
-            const toolValues = Object.values(toolCallsData);
+        // Load tool performance data
+        async function loadToolPerformance() {
+            try {
+                const response = await fetch('/metrics/api/tools/performance');
+                const tools = await response.json();
+                renderToolPerformance(tools);
+            } catch (e) {
+                console.error('Failed to load tool performance:', e);
+            }
+        }
+        
+        function renderToolPerformance(tools) {
+            const tbody = document.getElementById('tools-body');
+            if (tools.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-4 text-center text-gray-500">No tool calls yet</td></tr>';
+                return;
+            }
             
-            new Chart(toolCallsCtx, {
-                type: 'bar',
-                data: {
-                    labels: toolLabels,
-                    datasets: [{
-                        label: 'Tool Calls',
-                        data: toolValues,
-                        backgroundColor: 'rgba(59, 130, 246, 0.5)',
-                        borderColor: 'rgba(59, 130, 246, 1)',
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
-            
-            const userActivityCtx = document.getElementById('userActivityChart').getContext('2d');
-            const userLabels = userMetrics.map(u => u.userId.substring(0, 15) + (u.userId.length > 15 ? '...' : ''));
-            const userRequests = userMetrics.map(u => u.totalRequests);
-            const userToolCalls = userMetrics.map(u => u.totalToolCalls);
-            
-            new Chart(userActivityCtx, {
-                type: 'bar',
-                data: {
-                    labels: userLabels,
-                    datasets: [
-                        {
-                            label: 'Requests',
-                            data: userRequests,
-                            backgroundColor: 'rgba(99, 102, 241, 0.5)',
-                            borderColor: 'rgba(99, 102, 241, 1)',
-                            borderWidth: 1
-                        },
-                        {
-                            label: 'Tool Calls',
-                            data: userToolCalls,
-                            backgroundColor: 'rgba(34, 197, 94, 0.5)',
-                            borderColor: 'rgba(34, 197, 94, 1)',
-                            borderWidth: 1
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { position: 'top' } },
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
+            tbody.innerHTML = tools.map((tool, index) => {
+                const successRate = tool.successRate.toFixed(1);
+                const calls = tool.calls.toLocaleString();
+                const isEditTool = tool.isEditTool;
+                const linesAdded = tool.linesAdded || 0;
+                const linesRemoved = tool.linesRemoved || 0;
+                
+                // Color coding based on success rate
+                let successClass = 'text-green-600';
+                if (successRate < 90) successClass = 'text-yellow-600';
+                if (successRate < 70) successClass = 'text-red-600';
+                
+                // Alternate row background for better readability
+                const rowClass = index % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+                
+                return `
+                <tr class="${rowClass} hover:bg-blue-50 transition-colors">
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <span class="text-sm font-medium text-gray-900">${escapeHtml(tool.toolName)}</span>
+                            ${isEditTool ? '<span class="ml-2 px-2 py-0.5 text-xs rounded bg-green-100 text-green-800">edit</span>' : ''}
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right">
+                        <span class="text-sm font-semibold text-blue-600">${calls}</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right">
+                        <span class="text-sm font-semibold ${successClass}">${successRate}%</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+                        ${isEditTool 
+                            ? `<span class="text-green-600 font-medium">+${linesAdded.toLocaleString()}</span> <span class="text-red-600 font-medium">-${linesRemoved.toLocaleString()}</span>`
+                            : '<span class="text-gray-400">-</span>'}
+                    </td>
+                </tr>
+                `;
+            }).join('');
         }
         
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             loadTurns();
-            initCharts();
         });
         
         // Auto-refresh every 10 seconds
@@ -791,6 +794,7 @@
             if (activeTab === 'turns') loadTurns();
             if (activeTab === 'otel') loadOtelChains();
             if (activeTab === 'sessions') loadSessions();
+            if (activeTab === 'tools') loadToolPerformance();
         }, 10000);
         
         // Close modal on escape key

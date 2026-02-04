@@ -463,6 +463,84 @@ public class MetricsDashboardController {
         return sessionTurns;
     }
 
+    /**
+     * Get tool performance statistics for the Tool Performance Matrix view.
+     * Returns aggregated metrics per tool including call count, success rate, and lines changed.
+     */
+    @GetMapping("/api/tools/performance")
+    @ResponseBody
+    public List<Map<String, Object>> getToolPerformance() {
+        List<Map<String, Object>> allTurns = traceService.getRecentTurns();
+        
+        // Aggregate tool call statistics
+        Map<String, ToolStats> toolStatsMap = new LinkedHashMap<>();
+        
+        for (Map<String, Object> turn : allTurns) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) turn.get("toolCallsDetails");
+            if (toolCalls == null) continue;
+            
+            for (Map<String, Object> tc : toolCalls) {
+                String toolName = (String) tc.get("name");
+                if (toolName == null) continue;
+                
+                ToolStats stats = toolStatsMap.computeIfAbsent(toolName, ToolStats::new);
+                stats.incrementCalls();
+                
+                // Track success (assume ok if not explicitly error)
+                String status = (String) tc.get("status");
+                if (status == null || "ok".equals(status)) {
+                    stats.incrementSuccess();
+                }
+                
+                // Track lines changed (for edit tools)
+                Object linesAdded = tc.get("linesAdded");
+                Object linesRemoved = tc.get("linesRemoved");
+                if (linesAdded instanceof Number) {
+                    stats.addLinesAdded(((Number) linesAdded).intValue());
+                }
+                if (linesRemoved instanceof Number) {
+                    stats.addLinesRemoved(((Number) linesRemoved).intValue());
+                }
+            }
+        }
+        
+        // Convert to list and sort by call count (descending)
+        return toolStatsMap.values().stream()
+                .map(stats -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("toolName", stats.toolName);
+                    map.put("calls", stats.calls);
+                    map.put("successRate", stats.calls > 0 ? (stats.successCount * 100.0 / stats.calls) : 100.0);
+                    map.put("linesAdded", stats.linesAdded);
+                    map.put("linesRemoved", stats.linesRemoved);
+                    map.put("isEditTool", stats.linesAdded > 0 || stats.linesRemoved > 0);
+                    return map;
+                })
+                .sorted((a, b) -> Long.compare((Long) b.get("calls"), (Long) a.get("calls")))
+                .collect(Collectors.toList());
+    }
+    
+    /**
+     * Helper class for aggregating tool statistics
+     */
+    private static class ToolStats {
+        String toolName;
+        long calls = 0;
+        long successCount = 0;
+        long linesAdded = 0;
+        long linesRemoved = 0;
+        
+        ToolStats(String toolName) {
+            this.toolName = toolName;
+        }
+        
+        void incrementCalls() { calls++; }
+        void incrementSuccess() { successCount++; }
+        void addLinesAdded(long n) { linesAdded += n; }
+        void addLinesRemoved(long n) { linesRemoved += n; }
+    }
+
     // Helper methods
 
     private Map<String, Object> userMetricsToMap(TraceService.UserTraceMetrics metrics) {
