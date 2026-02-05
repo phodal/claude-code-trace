@@ -235,7 +235,7 @@ curl http://localhost:8080/otel/exporters
 
 ### 仪表板
 
-访问 `http://localhost:8080/dashboard` 查看可视化监控仪表板，包含以下标签页：
+访问 `http://localhost:8080/metrics` 查看可视化监控仪表板，包含以下标签页：
 
 - **Messages (Turns)**：查看每条消息的详情，包括工具调用、延迟和 token 使用情况
 - **Sessions**：用户会话概览，包含累计指标和平均值
@@ -246,13 +246,18 @@ curl http://localhost:8080/otel/exporters
 
 | 端点                                            | 说明              |
 |-----------------------------------------------|-----------------|
-| `GET /metrics/api/turns`                      | 获取最近的 Turn 列表   |
-| `GET /metrics/api/turns/{turnId}`             | 获取特定 Turn 的详情   |
-| `GET /metrics/api/sessions`                   | 获取活跃会话列表        |
-| `GET /metrics/api/sessions/{sessionId}`       | 获取会话详情          |
-| `GET /metrics/api/sessions/{sessionId}/turns` | 获取会话中的所有消息      |
-| `GET /metrics/api/users/{userId}/turns`       | 获取用户的所有消息       |
-| `GET /metrics/api/users/{userId}/sessions`    | 获取用户的所有会话       |
+| `GET /metrics/api/summary`                    | 获取聚合指标摘要（requests/tool_calls/lines/tokens 等） |
+| `GET /metrics/api/turns`                      | 获取最近的 Turns（所有会话，包含无文件编辑的请求） |
+| `GET /metrics/api/turns/{turnId}`             | 获取特定 Turn 的详情（兼容旧 UI：traceId 或 conversationId） |
+| `GET /metrics/api/sessions`                   | 获取 Sessions（按 user + clientSessionId 或 30min idle gap 聚合） |
+| `GET /metrics/api/sessions/{sessionId}/turns` | 获取指定 Session 内的 Turns |
+| `GET /metrics/api/traces`                     | 获取最近的 Agent Trace（仅包含发生文件编辑的会话） |
+| `GET /metrics/api/traces/{traceId}`           | 获取指定 Trace 详情 |
+| `GET /metrics/api/traces/by-file?filePath=...`| 按文件路径过滤 Trace |
+| `GET /metrics/api/traces/by-time?from=...&to=...` | 按时间范围过滤 Trace（ISO-8601） |
+| `GET /metrics/api/tools/performance`          | 工具调用表现矩阵（调用数/成功率/增删行） |
+| `GET /metrics/api/skills/statistics`          | Skill 统计（从 tool name=Skill 的 argsPreview 里解析 skill 名） |
+| `GET /metrics/api/otel/chains?limit=...`      | OTEL 链路分组（基于 tool_use_id emitted/consumed 推断跨请求链） |
 | `GET /actuator/prometheus`                    | Prometheus 指标端点 |
 
 ### Prometheus 指标
@@ -261,13 +266,23 @@ curl http://localhost:8080/otel/exporters
 curl http://localhost:8080/actuator/prometheus
 ```
 
-关键指标：
-- `claude_code.requests.total` - 总请求数
-- `claude_code.requests.by_model` - 按模型分类的请求数
-- `claude_code.tool_calls.total` - 总工具调用数
-- `claude_code.tool_calls.by_name` - 按名称分类的工具调用数
-- `claude_code.edit_tool_calls.total` - 编辑工具调用数
-- `claude_code.lines_modified.total` - 总修改行数
+#### 自定义指标清单（当前口径）
+
+这些指标由 `TraceService` 通过 Micrometer 注册并在 `/actuator/prometheus` 暴露。
+
+| 指标名 | 类型 | 何时增加（统计口径） | 标签（tags） | 单位/值含义 | 备注 |
+|---|---|---|---|---|---|
+| `agent_trace.requests.total` | Counter | 每次进入 `POST /anthropic/v1/messages` 且通过 API Key 校验后（`startConversation()`）+1 | 无 | 请求数 | 未携带/无效 API Key 的 401 不计入 |
+| `agent_trace.requests.by_model` | Counter | 同上，每次请求 +1 | `model`（normalize 后）、`user` | 请求数 | **包含 user tag**，Prometheus 侧可能带来较高基数 |
+| `agent_trace.tool_calls.total` | Counter | 每记录一次 tool call（包含编辑类与非编辑类）+1 | 无 | 工具调用数 | tool call 来自 upstream OpenAI tool_calls（streaming 会在结束时批量记录） |
+| `agent_trace.tool_calls.by_name` | Counter | 每记录一次 **非编辑类** tool call +1 | `tool`、`user` | 工具调用数 | **当前不包含编辑类 tool call**（编辑类会走 file_edit 逻辑并提前 return） |
+| `agent_trace.file_edits.total` | Counter | 当 tool call 被判定为“编辑类”且能从 args 解析到 `file_path/path/filePath` 时 +1 | 无 | 文件编辑次数 | 目前仅 `recordToolCall()` 触发（项目内未直接调用 `recordFileEdit()`） |
+| `agent_trace.lines_modified.total` | Counter | 每次记录 file edit 时增加 \(linesAdded + linesRemoved\) | 无 | 修改行数（触达行） | **估算值**：从 tool args 的 `old_string/new_string` 或 `content` 推断行数，不等同于真实 diff |
+
+#### 备注：编辑类工具识别与行数估算
+
+- **编辑类工具识别**：tool name 命中内置列表（如 `str_replace_editor`/`EditNotebook` 等）或包含 `edit/write/replace/create_file/modify` 关键字。
+- **行数估算**：从 tool args JSON 中优先读取 `old_string/new_string`（或变体）计算行数；否则读取 `content/contents`；最终以 “增加行数 + 删除行数” 作为 `lines_modified` 口径。
 
 ## Docker 部署
 
