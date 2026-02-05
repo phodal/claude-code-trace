@@ -11,6 +11,8 @@ import com.openai.models.chat.completions.*;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.models.chat.completions.ChatCompletionStreamOptions;
 import com.phodal.anthropicproxy.model.anthropic.*;
+import com.phodal.anthropicproxy.otel.OtelSpanManager;
+import io.opentelemetry.api.trace.StatusCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -35,14 +37,17 @@ public class OpenAISdkService {
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final TraceService traceService;
+    private final OtelSpanManager otelSpanManager;
 
     public OpenAISdkService(
             @Value("${proxy.openai.base-url}") String baseUrl,
             ObjectMapper objectMapper,
-            TraceService traceService) {
+            TraceService traceService,
+            OtelSpanManager otelSpanManager) {
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
         this.traceService = traceService;
+        this.otelSpanManager = otelSpanManager;
     }
 
     private OpenAIClient createClient(String apiKey) {
@@ -57,36 +62,56 @@ public class OpenAISdkService {
      */
     public Mono<AnthropicResponse> sendRequest(AnthropicRequest anthropicRequest, String userId, String conversationId, String apiKey) {
         return Mono.fromCallable(() -> {
-            long startTime = System.currentTimeMillis();
-            OpenAIClient client = createClient(apiKey);
-            ChatCompletionCreateParams params = buildChatCompletionParams(anthropicRequest);
-            
-            ChatCompletion completion = client.chat().completions().create(params);
-            long latencyMs = System.currentTimeMillis() - startTime;
-            
-            // Record response metrics
-            int promptTokens = 0, completionTokens = 0;
-            if (completion.usage().isPresent()) {
-                promptTokens = (int) completion.usage().get().promptTokens();
-                completionTokens = (int) completion.usage().get().completionTokens();
-            }
-            traceService.recordResponse(conversationId, promptTokens, completionTokens, latencyMs);
-            
-            // Record tool calls
-            ChatCompletionMessage message = completion.choices().get(0).message();
-            message.toolCalls().ifPresent(toolCalls -> {
-                for (var toolCall : toolCalls) {
-                    toolCall.function().ifPresent(func -> {
-                        // Preserve tool call id so we can correlate tool_use -> tool_result across requests.
-                        traceService.recordToolCall(conversationId,
-                            func.id(),
-                            func.function().name(),
-                            func.function().arguments());
-                    });
+            // Create CLIENT span for upstream API call
+            try (OtelSpanManager.SpanScope clientSpan = otelSpanManager.startClientSpan("upstream.chat.completions")) {
+                clientSpan.setAttribute("ai.model", anthropicRequest.getModel());
+                clientSpan.setAttribute("ai.endpoint", baseUrl);
+                clientSpan.setAttribute("ai.streaming", false);
+                
+                long startTime = System.currentTimeMillis();
+                OpenAIClient client = createClient(apiKey);
+                ChatCompletionCreateParams params = buildChatCompletionParams(anthropicRequest);
+                
+                ChatCompletion completion;
+                try {
+                    completion = client.chat().completions().create(params);
+                } catch (Exception e) {
+                    clientSpan.setStatus(StatusCode.ERROR, e.getMessage());
+                    clientSpan.recordException(e);
+                    throw e;
                 }
-            });
-            
-            return convertToAnthropicResponse(completion, anthropicRequest.getModel());
+                
+                long latencyMs = System.currentTimeMillis() - startTime;
+                clientSpan.setAttribute("ai.latency_ms", latencyMs);
+                
+                // Record response metrics
+                int promptTokens = 0, completionTokens = 0;
+                if (completion.usage().isPresent()) {
+                    promptTokens = (int) completion.usage().get().promptTokens();
+                    completionTokens = (int) completion.usage().get().completionTokens();
+                }
+                clientSpan.setAttribute("ai.tokens.input", promptTokens);
+                clientSpan.setAttribute("ai.tokens.output", completionTokens);
+                traceService.recordResponse(conversationId, promptTokens, completionTokens, latencyMs);
+                
+                // Record tool calls
+                ChatCompletionMessage message = completion.choices().get(0).message();
+                message.toolCalls().ifPresent(toolCalls -> {
+                    clientSpan.setAttribute("ai.tool_call_count", toolCalls.size());
+                    for (var toolCall : toolCalls) {
+                        toolCall.function().ifPresent(func -> {
+                            // Preserve tool call id so we can correlate tool_use -> tool_result across requests.
+                            traceService.recordToolCall(conversationId,
+                                func.id(),
+                                func.function().name(),
+                                func.function().arguments());
+                        });
+                    }
+                });
+                
+                clientSpan.setStatus(StatusCode.OK);
+                return convertToAnthropicResponse(completion, anthropicRequest.getModel());
+            }
         }).subscribeOn(Schedulers.boundedElastic());
     }
 
@@ -95,6 +120,12 @@ public class OpenAISdkService {
      */
     public Flux<String> sendStreamingRequest(AnthropicRequest anthropicRequest, String userId, String conversationId, String apiKey) {
         return Flux.<String>create(sink -> {
+            // Create CLIENT span for streaming upstream API call
+            OtelSpanManager.SpanScope clientSpan = otelSpanManager.startClientSpan("upstream.chat.completions.stream");
+            clientSpan.setAttribute("ai.model", anthropicRequest.getModel());
+            clientSpan.setAttribute("ai.endpoint", baseUrl);
+            clientSpan.setAttribute("ai.streaming", true);
+            
             long startTime = System.currentTimeMillis();
             try {
                 OpenAIClient client = createClient(apiKey);
@@ -338,15 +369,28 @@ public class OpenAISdkService {
                     }
                     
                     long latencyMs = System.currentTimeMillis() - startTime;
+                    
+                    // Record OTEL span attributes
+                    clientSpan.setAttribute("ai.latency_ms", latencyMs);
+                    clientSpan.setAttribute("ai.tokens.input", promptTokens[0]);
+                    clientSpan.setAttribute("ai.tokens.output", completionTokens[0]);
+                    clientSpan.setAttribute("ai.tool_call_count", collectedToolCalls.size());
+                    clientSpan.setStatus(StatusCode.OK);
+                    
                     // Record response metrics (tokens and latency)
                     traceService.recordResponse(conversationId, promptTokens[0], completionTokens[0], latencyMs);
                     // Record tool calls but do NOT end conversation here.
                     // Conversation lifecycle is managed by the Controller.
                     traceService.recordStreamingToolCallsOnly(userId, conversationId, collectedToolCalls, latencyMs);
+                    
+                    clientSpan.close();
                     sink.complete();
                 }
             } catch (Exception e) {
                 log.error("Error during streaming: {}", e.getMessage(), e);
+                clientSpan.setStatus(StatusCode.ERROR, e.getMessage());
+                clientSpan.recordException(e);
+                clientSpan.close();
                 sink.error(e);
             }
         }, reactor.core.publisher.FluxSink.OverflowStrategy.BUFFER)

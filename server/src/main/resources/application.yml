@@ -11,7 +11,7 @@ proxy:
     api-key: ${OPENAI_API_KEY:}
     timeout: 300000
 
-# OpenTelemetry Configuration
+# OpenTelemetry Configuration (Legacy - custom exporters)
 otel:
   exporter:
     # Console exporter (enabled by default for debugging)
@@ -25,6 +25,18 @@ otel:
     zipkin:
       enabled: ${OTEL_ZIPKIN_ENABLED:false}
       endpoint: ${OTEL_ZIPKIN_ENDPOINT:http://localhost:9411}
+
+  # OpenTelemetry SDK Configuration (standard OTLP export)
+  sdk:
+    enabled: ${OTEL_SDK_ENABLED:false}
+    service-name: ${OTEL_SERVICE_NAME:anthropic-proxy}
+    service-version: ${OTEL_SERVICE_VERSION:1.0.0}
+    environment: ${OTEL_ENVIRONMENT:dev}
+    otlp:
+      enabled: ${OTEL_OTLP_ENABLED:true}
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      protocol: ${OTEL_EXPORTER_OTLP_PROTOCOL:grpc}
+      timeout-ms: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
 
 management:
   endpoints:

@@ -2,6 +2,7 @@ package com.phodal.anthropicproxy.controller;
 
 import com.phodal.anthropicproxy.model.anthropic.AnthropicRequest;
 import com.phodal.anthropicproxy.model.anthropic.AnthropicResponse;
+import com.phodal.anthropicproxy.otel.OtelSpanManager;
 import com.phodal.anthropicproxy.otel.model.Span;
 import com.phodal.anthropicproxy.otel.model.SpanKind;
 import com.phodal.anthropicproxy.otel.model.SpanStatus;
@@ -44,6 +45,7 @@ public class AnthropicProxyController {
     private final UserIdentificationService userIdentificationService;
     private final OtelTraceService otelTraceService;
     private final ExporterService exporterService;
+    private final OtelSpanManager otelSpanManager;
     
     // Whitelist only (avoid recording sensitive headers)
     private static final Set<String> CORRELATION_HEADER_KEYS = Set.of(
@@ -94,6 +96,10 @@ public class AnthropicProxyController {
         log.info("Received request from user: {}, model: {}, stream: {}, traceId: {}", 
                 userId, request.getModel(), request.getStream(), traceId);
 
+        // Add attributes to real OTEL SDK span (created by TraceContextFilter)
+        boolean streaming = Boolean.TRUE.equals(request.getStream());
+        otelSpanManager.addRequestAttributes(httpRequest, request.getModel(), userId, null, streaming);
+
         if (apiKey == null || apiKey.isEmpty()) {
             log.error("No API key provided");
             rootSpan.setStatus(SpanStatus.error("No API key provided"));
@@ -113,6 +119,9 @@ public class AnthropicProxyController {
         // Start conversation and get conversationId for Agent Trace tracking
         String conversationId = traceService.startConversation(userId, request, headers);
         rootSpan.addAttribute("conversation.id", conversationId);
+        
+        // Update OTEL SDK span with conversation ID
+        otelSpanManager.addRequestAttributes(httpRequest, request.getModel(), userId, conversationId, streaming);
 
         // Correlation: tool_use_ids consumed by this request (tool_result.tool_use_id)
         List<String> consumedToolUseIds = extractConsumedToolUseIds(request);
