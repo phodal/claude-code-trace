@@ -141,11 +141,19 @@ public class TraceService {
      * Record request latency with tags.
      */
     public void recordRequestLatency(String model, boolean stream, String status, long latencyMs) {
+        recordRequestLatency(model, stream, status, latencyMs, null);
+    }
+
+    /**
+     * Record request latency with tags, including HTTP status code.
+     */
+    public void recordRequestLatency(String model, boolean stream, String status, long latencyMs, Integer statusCode) {
         Timer.builder("agent_trace.request.latency")
                 .description("Request latency from client to response complete")
                 .tag("model", model != null ? ModelIdNormalizer.normalize(model) : "unknown")
                 .tag("stream", String.valueOf(stream))
                 .tag("status", status != null ? status : "unknown")
+                .tag("status_code", normalizeStatusCode(statusCode))
                 .register(meterRegistry)
                 .record(latencyMs, TimeUnit.MILLISECONDS);
     }
@@ -154,10 +162,18 @@ public class TraceService {
      * Record request error.
      */
     public void recordRequestError(String errorType, boolean stream) {
+        recordRequestError(errorType, stream, null);
+    }
+
+    /**
+     * Record request error with HTTP status code.
+     */
+    public void recordRequestError(String errorType, boolean stream, Integer statusCode) {
         Counter.builder("agent_trace.requests.errors.total")
                 .description("Total request errors")
                 .tag("error_type", errorType != null ? errorType : "unknown")
                 .tag("stream", String.valueOf(stream))
+                .tag("status_code", normalizeStatusCode(statusCode))
                 .register(meterRegistry)
                 .increment();
     }
@@ -166,11 +182,19 @@ public class TraceService {
      * Record upstream API latency.
      */
     public void recordUpstreamLatency(String model, boolean stream, String status, long latencyMs) {
+        recordUpstreamLatency(model, stream, status, latencyMs, null);
+    }
+
+    /**
+     * Record upstream API latency with HTTP status code.
+     */
+    public void recordUpstreamLatency(String model, boolean stream, String status, long latencyMs, Integer statusCode) {
         Timer.builder("agent_trace.upstream.latency")
                 .description("Upstream API call latency")
                 .tag("model", model != null ? ModelIdNormalizer.normalize(model) : "unknown")
                 .tag("stream", String.valueOf(stream))
                 .tag("status", status != null ? status : "unknown")
+                .tag("status_code", normalizeStatusCode(statusCode))
                 .register(meterRegistry)
                 .record(latencyMs, TimeUnit.MILLISECONDS);
     }
@@ -179,12 +203,27 @@ public class TraceService {
      * Record upstream API error.
      */
     public void recordUpstreamError(String errorType, boolean stream) {
+        recordUpstreamError(errorType, stream, null);
+    }
+
+    /**
+     * Record upstream API error with HTTP status code.
+     */
+    public void recordUpstreamError(String errorType, boolean stream, Integer statusCode) {
         Counter.builder("agent_trace.upstream.errors.total")
                 .description("Total upstream API errors")
                 .tag("error_type", errorType != null ? errorType : "unknown")
                 .tag("stream", String.valueOf(stream))
+                .tag("status_code", normalizeStatusCode(statusCode))
                 .register(meterRegistry)
                 .increment();
+    }
+
+    private static String normalizeStatusCode(Integer statusCode) {
+        if (statusCode == null) {
+            return "unknown";
+        }
+        return String.valueOf(statusCode);
     }
 
     @PostConstruct

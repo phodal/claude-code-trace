@@ -104,6 +104,8 @@ public class AnthropicProxyController {
             log.error("No API key provided");
             // Record auth failure metric
             traceService.recordAuthFailure();
+            // Record request error metric with HTTP status
+            traceService.recordRequestError("authentication_error", streaming, 401);
             
             rootSpan.setStatus(SpanStatus.error("No API key provided"));
             otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
@@ -202,7 +204,7 @@ public class AnthropicProxyController {
 
             // Record request error metric
             String errorType = e.getClass().getSimpleName();
-            traceService.recordRequestError(errorType, false);
+            traceService.recordRequestError(errorType, false, 500);
 
             apiSpan.setStatus(SpanStatus.error(e.getMessage()));
             rootSpan.setStatus(SpanStatus.error(e.getMessage()));
@@ -217,7 +219,7 @@ public class AnthropicProxyController {
         } finally {
             // Record request latency metric
             long latencyMs = System.currentTimeMillis() - startTime;
-            traceService.recordRequestLatency(request.getModel(), false, status, latencyMs);
+            traceService.recordRequestLatency(request.getModel(), false, status, latencyMs, "ok".equals(status) ? 200 : 500);
 
             otelTraceService.endSpan(apiSpan, apiSpan.getStatus());
             otelTraceService.endSpan(rootSpan, rootSpan.getStatus());
@@ -269,7 +271,7 @@ public class AnthropicProxyController {
                         writer.flush();
 
                         // Record streaming error metric
-                        traceService.recordRequestError(e.getClass().getSimpleName(), true);
+                        traceService.recordRequestError(e.getClass().getSimpleName(), true, 500);
 
                         streamSpan.setStatus(SpanStatus.error(e.getMessage()));
                         rootSpan.setStatus(SpanStatus.error(e.getMessage()));
@@ -286,7 +288,7 @@ public class AnthropicProxyController {
 
                         // Record streaming request latency metric
                         long latencyMs = System.currentTimeMillis() - startTime;
-                        traceService.recordRequestLatency(request.getModel(), true, status[0], latencyMs);
+                        traceService.recordRequestLatency(request.getModel(), true, status[0], latencyMs, "ok".equals(status[0]) ? 200 : 500);
 
                         // Correlation: tool_use ids emitted during streaming (recorded by TraceService)
                         List<String> emitted = traceService.getToolCallIds(conversationId);
