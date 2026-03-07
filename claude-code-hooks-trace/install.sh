@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code Hooks Trace - Installation Script
-# Usage: ./install.sh [target_project_dir] [--python|--typescript|--bash]
+# Usage: ./install.sh [target_project_dir] [--python|--javascript|--bash]
 
 set -e
 
@@ -25,11 +25,12 @@ mkdir -p "$TARGET_DIR/.agent-trace"
 echo "Copying hook scripts..."
 cp "$SCRIPT_DIR/.claude/hooks/"*.sh "$TARGET_DIR/.claude/hooks/"
 cp "$SCRIPT_DIR/.claude/hooks/trace_handler.py" "$TARGET_DIR/.claude/hooks/"
-cp "$SCRIPT_DIR/.claude/hooks/trace_handler.ts" "$TARGET_DIR/.claude/hooks/" 2>/dev/null || true
+cp "$SCRIPT_DIR/.claude/hooks/trace_handler.js" "$TARGET_DIR/.claude/hooks/" 2>/dev/null || true
 
 # Make scripts executable
 chmod +x "$TARGET_DIR/.claude/hooks/"*.sh
 chmod +x "$TARGET_DIR/.claude/hooks/"*.py 2>/dev/null || true
+chmod +x "$TARGET_DIR/.claude/hooks/"*.js 2>/dev/null || true
 
 # Copy settings based on handler type
 case "$HANDLER_TYPE" in
@@ -37,20 +38,9 @@ case "$HANDLER_TYPE" in
         echo "Using Python handler..."
         cp "$SCRIPT_DIR/.claude/settings.python.json" "$TARGET_DIR/.claude/settings.json"
         ;;
-    --typescript)
-        echo "Using TypeScript handler..."
-        # Create TypeScript settings
-        cat > "$TARGET_DIR/.claude/settings.json" << 'EOF'
-{
-  "hooks": {
-    "SessionStart": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "npx ts-node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace_handler.ts SessionStart" }] }],
-    "PreToolUse": [{ "matcher": "Write|Edit|Bash", "hooks": [{ "type": "command", "command": "npx ts-node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace_handler.ts PreToolUse" }] }],
-    "PostToolUse": [{ "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "npx ts-node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace_handler.ts PostToolUse" }] }],
-    "Stop": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "npx ts-node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace_handler.ts Stop" }] }],
-    "Notification": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "npx ts-node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace_handler.ts Notification" }] }]
-  }
-}
-EOF
+    --javascript|--js|--node)
+        echo "Using JavaScript (Node.js) handler..."
+        cp "$SCRIPT_DIR/.claude/settings.javascript.json" "$TARGET_DIR/.claude/settings.json"
         ;;
     --bash|*)
         echo "Using Bash handler..."

@@ -9,7 +9,7 @@
 ## 特性
 
 - 🪝 **原生 Hooks 集成** - 直接使用 Claude Code 的 Hooks API
-- 📝 **多语言支持** - 提供 Bash、Python、TypeScript 三种实现
+- 📝 **多语言支持** - 提供 Bash、Python、JavaScript (Node.js) 三种实现
 - 📊 **会话追踪** - 完整记录会话生命周期
 - 🔧 **工具追踪** - 追踪 Write、Edit、Bash 等工具调用
 - 📁 **文件追踪** - 记录所有文件修改
@@ -42,12 +42,9 @@ chmod +x /your/project/.claude/hooks/*.sh
 cp .claude/settings.python.json .claude/settings.json
 ```
 
-**TypeScript**
+**JavaScript (Node.js)**
 ```bash
-# 安装依赖
-npm install -g ts-node typescript @types/node
-
-# 配置 settings.json 使用 ts-node
+cp .claude/settings.javascript.json .claude/settings.json
 ```
 
 ### 4. 开始使用
@@ -58,8 +55,9 @@ npm install -g ts-node typescript @types/node
 
 ```
 .claude/
-├── settings.json              # Hooks 配置文件
+├── settings.json              # Hooks 配置文件 (Bash 版本)
 ├── settings.python.json       # Python 版本配置
+├── settings.javascript.json   # JavaScript 版本配置
 └── hooks/
     ├── session-start.sh       # 会话开始 hook
     ├── pre-tool-use.sh        # 工具调用前 hook
@@ -67,7 +65,7 @@ npm install -g ts-node typescript @types/node
     ├── session-stop.sh        # 会话结束 hook
     ├── notification.sh        # 通知 hook
     ├── trace_handler.py       # Python 处理器
-    └── trace_handler.ts       # TypeScript 处理器
+    └── trace_handler.js       # JavaScript (Node.js) 处理器
 
 scripts/
 ├── trace_analyzer.py          # Trace 分析工具

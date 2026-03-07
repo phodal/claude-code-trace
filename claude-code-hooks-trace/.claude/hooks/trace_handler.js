@@ -1,47 +1,18 @@
-#!/usr/bin/env npx ts-node
+#!/usr/bin/env node
 /**
- * Claude Code Hooks Trace Handler (TypeScript)
+ * Claude Code Hooks Trace Handler (JavaScript)
  * A comprehensive trace handler that records all Claude Code activities.
  * 
- * Usage: npx ts-node trace_handler.ts <event_type>
- * Or compile and run: tsc trace_handler.ts && node trace_handler.js <event_type>
+ * Usage: node trace_handler.js <event_type>
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import { execSync } from 'child_process';
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
 
 const VERSION = '0.1.0';
 
-interface TraceRecord {
-  version: string;
-  event_type: string;
-  session_id?: string;
-  timestamp: string;
-  span_id?: string;
-  tool?: { name: string; input?: any; output?: any };
-  file?: { path: string; exists?: boolean; line_count?: number };
-  context?: any;
-  notification?: any;
-  summary?: any;
-  [key: string]: any;
-}
-
-interface HookInput {
-  session_id?: string;
-  tool_name?: string;
-  tool_input?: Record<string, any>;
-  tool_output?: Record<string, any>;
-  stop_hook_active?: boolean;
-  type?: string;
-  title?: string;
-  message?: string;
-}
-
 class TraceHandler {
-  private projectDir: string;
-  private traceDir: string;
-
   constructor() {
     this.projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
     this.traceDir = path.join(this.projectDir, '.agent-trace');
@@ -50,7 +21,7 @@ class TraceHandler {
     }
   }
 
-  private getCurrentTraceFile(): string {
+  getCurrentTraceFile() {
     const markerFile = path.join(this.traceDir, '.current_trace_file');
     if (fs.existsSync(markerFile)) {
       return fs.readFileSync(markerFile, 'utf-8').trim();
@@ -59,21 +30,21 @@ class TraceHandler {
     return path.join(this.traceDir, `session-${timestamp}.jsonl`);
   }
 
-  private getGitInfo(): { type: string; commit: string; branch: string } {
+  getGitInfo() {
     const gitInfo = { type: 'git', commit: '', branch: '' };
     try {
       gitInfo.commit = execSync('git rev-parse HEAD', { cwd: this.projectDir, encoding: 'utf-8' }).trim();
       gitInfo.branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: this.projectDir, encoding: 'utf-8' }).trim();
-    } catch {}
+    } catch (e) {}
     return gitInfo;
   }
 
-  private writeTrace(record: TraceRecord): void {
+  writeTrace(record) {
     const traceFile = this.getCurrentTraceFile();
     fs.appendFileSync(traceFile, JSON.stringify(record) + '\n');
   }
 
-  private createBaseRecord(eventType: string, input: HookInput): TraceRecord {
+  createBaseRecord(eventType, input) {
     return {
       version: VERSION,
       event_type: eventType,
@@ -82,7 +53,7 @@ class TraceHandler {
     };
   }
 
-  handleSessionStart(input: HookInput): object {
+  handleSessionStart(input) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const traceFile = path.join(this.traceDir, `session-${timestamp}.jsonl`);
     fs.writeFileSync(path.join(this.traceDir, '.current_trace_file'), traceFile);
@@ -95,7 +66,7 @@ class TraceHandler {
     return { systemMessage: 'Trace session initialized' };
   }
 
-  handlePreToolUse(input: HookInput): object {
+  handlePreToolUse(input) {
     const spanId = `span-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     fs.writeFileSync(path.join(this.traceDir, '.current_span_id'), spanId);
     
@@ -108,7 +79,7 @@ class TraceHandler {
     return {};
   }
 
-  handlePostToolUse(input: HookInput): object {
+  handlePostToolUse(input) {
     const spanIdFile = path.join(this.traceDir, '.current_span_id');
     const spanId = fs.existsSync(spanIdFile) ? fs.readFileSync(spanIdFile, 'utf-8').trim() : '';
     
@@ -125,12 +96,12 @@ class TraceHandler {
         line_count: fs.existsSync(fullPath) ? fs.readFileSync(fullPath, 'utf-8').split('\n').length : 0
       };
     }
-    try { fs.unlinkSync(spanIdFile); } catch {}
+    try { fs.unlinkSync(spanIdFile); } catch (e) {}
     this.writeTrace(record);
     return {};
   }
 
-  handleStop(input: HookInput): object {
+  handleStop(input) {
     if (input.stop_hook_active) return {};
     const record = this.createBaseRecord('session_stop', input);
     const traceFile = this.getCurrentTraceFile();
@@ -141,7 +112,7 @@ class TraceHandler {
     return {};
   }
 
-  handleNotification(input: HookInput): object {
+  handleNotification(input) {
     const record = this.createBaseRecord('notification', input);
     record.notification = { type: input.type, title: input.title, message: input.message };
     this.writeTrace(record);
@@ -152,16 +123,16 @@ class TraceHandler {
 async function main() {
   const eventType = process.argv[2];
   if (!eventType) {
-    console.error('Usage: trace_handler.ts <event_type>');
+    console.error('Usage: node trace_handler.js <event_type>');
     process.exit(1);
   }
 
   let inputData = '';
   for await (const chunk of process.stdin) inputData += chunk;
-  const input: HookInput = JSON.parse(inputData);
+  const input = JSON.parse(inputData);
   
   const handler = new TraceHandler();
-  const handlers: Record<string, (input: HookInput) => object> = {
+  const handlers = {
     SessionStart: (i) => handler.handleSessionStart(i),
     PreToolUse: (i) => handler.handlePreToolUse(i),
     PostToolUse: (i) => handler.handlePostToolUse(i),
