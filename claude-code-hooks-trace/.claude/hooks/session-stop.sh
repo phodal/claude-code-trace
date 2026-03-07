@@ -59,8 +59,8 @@ if [ -d "$PROJECT_DIR/.git" ]; then
     GIT_DIFF_SUMMARY="$FILES_CHANGED"
 fi
 
-# Create session stop trace record
-TRACE_RECORD=$(jq -n \
+# Create session stop trace record (use -nc for compact single-line JSON)
+TRACE_RECORD=$(jq -nc \
     --arg session_id "$SESSION_ID" \
     --arg timestamp "$TIMESTAMP" \
     --arg event_type "session_stop" \

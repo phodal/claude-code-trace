@@ -40,8 +40,8 @@ case "$TOOL_NAME" in
         ;;
 esac
 
-# Create pre-tool trace record
-TRACE_RECORD=$(jq -n \
+# Create pre-tool trace record (use -nc for compact single-line JSON)
+TRACE_RECORD=$(jq -nc \
     --arg session_id "$SESSION_ID" \
     --arg span_id "$SPAN_ID" \
     --arg timestamp "$TIMESTAMP" \

@@ -28,8 +28,8 @@ if [ -d "$PROJECT_DIR/.git" ]; then
     GIT_BRANCH=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 fi
 
-# Create session start trace record
-TRACE_RECORD=$(jq -n \
+# Create session start trace record (use -c for compact single-line JSON)
+TRACE_RECORD=$(jq -nc \
     --arg session_id "$SESSION_ID" \
     --arg timestamp "$TIMESTAMP" \
     --arg event_type "session_start" \
